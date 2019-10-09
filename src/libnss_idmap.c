@@ -143,7 +143,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id)
 			   (p_map->id_from_start == *id && p_map->id_from_end == 0))
 			{
 				#ifdef DEBUG
-				printf(stderr, "libnss_idmap: map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
+				printf(stderr, "libnss_idmap: forward map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
 				if(p_map->intv == MAPINTV_N_TO_1)
@@ -161,10 +161,45 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id)
 	}
 }
 
+void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
+{
+	struct idmapping *p_map;
+	
+	read_idmap();
+	
+	for(p_map = idmappings; p_map != NULL; p_map = p_map->next)
+	{
+		if(p_map->nssdb_type == nssdb_type)
+		{
+			if((p_map->intv == MAPINTV_N_TO_1 && p_map->id_to == *id) ||
+			   (p_map->intv == MAPINTV_N_TO_N && p_map->id_to <= *id && (p_map->id_to + (p_map->id_from_end - p_map->id_from_start)) >= *id))
+			{
+				#ifdef DEBUG
+				printf(stderr, "libnss_idmap: reverse map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
+				#endif
+				
+				if(p_map->intv == MAPINTV_N_TO_1)
+					/* NOTE: ambiguous reverse mapping */
+					*id = p_map->id_from_start;
+				else
+					*id = p_map->id_from_start + (*id - p_map->id_to);
+				
+				#ifdef DEBUG
+				printf(stderr, "to %d\n", *id);
+				#endif
+				
+				break;
+			}
+		}
+	}
+}
+
 void do_idmap_pwd(struct passwd *pwd)
 {
 	do_idmap(NSSDB_PASSWD, (id_t*)&(pwd->pw_uid));
 	do_idmap(NSSDB_GROUP, (id_t*)&(pwd->pw_gid));
+	
+	// FIXME: uid=2000 gid=2000 groups=4294967295,4(adm),...
 }
 
 
@@ -201,13 +236,18 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 	else
 	{
 		int error;
+		uid_t lookup_uid;
+		
+		lookup_uid = uid;
+		do_idmap_reverse(NSSDB_PASSWD, (id_t*)&lookup_uid);
 		
 		passthrough_mode = TRUE;
-		error = getpwuid_r(uid, result, buffer, buflen, &result);
+		error = getpwuid_r(lookup_uid, result, buffer, buflen, &result);
 		passthrough_mode = FALSE;
 		HANDLE_ERRORS_R;
 		
-		do_idmap_pwd(result);
+		result->pw_uid = uid;
+		do_idmap(NSSDB_GROUP, (id_t*)&(result->pw_gid));
 		
 		return NSS_STATUS_SUCCESS;
 	}
