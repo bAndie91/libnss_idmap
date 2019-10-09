@@ -202,6 +202,11 @@ void do_idmap_pwd(struct passwd *pwd)
 	// FIXME: uid=2000 gid=2000 groups=4294967295,4(adm),...
 }
 
+void do_idmap_grp(struct group *grp)
+{
+	do_idmap(NSSDB_GROUP, (id_t*)&(grp->gr_gid));
+}
+
 
 
 enum nss_status
@@ -248,6 +253,54 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		
 		result->pw_uid = uid;
 		do_idmap(NSSDB_GROUP, (id_t*)&(result->pw_gid));
+		
+		return NSS_STATUS_SUCCESS;
+	}
+}
+
+enum nss_status
+_nss_idmap_getgrnam_r(const char *name, struct group *result, char *buffer, size_t buflen, int *errnop)
+{
+	if(passthrough_mode)
+	{
+		return NSS_STATUS_UNAVAIL;
+	}
+	else
+	{
+		int error;
+		
+		passthrough_mode = TRUE;
+		error = getgrnam_r(name, result, buffer, buflen, &result);
+		passthrough_mode = FALSE;
+		HANDLE_ERRORS_R;
+		
+		do_idmap_grp(result);
+		
+		return NSS_STATUS_SUCCESS;
+	}
+}
+
+enum nss_status
+_nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t buflen, int *errnop)
+{
+	if(passthrough_mode)
+	{
+		return NSS_STATUS_UNAVAIL;
+	}
+	else
+	{
+		int error;
+		gid_t lookup_gid;
+		
+		lookup_gid = gid;
+		do_idmap_reverse(NSSDB_GROUP, (id_t*)&lookup_gid);
+		
+		passthrough_mode = TRUE;
+		error = getgrgid_r(lookup_gid, result, buffer, buflen, &result);
+		passthrough_mode = FALSE;
+		HANDLE_ERRORS_R;
+		
+		result->gr_gid = gid;
 		
 		return NSS_STATUS_SUCCESS;
 	}
