@@ -58,6 +58,7 @@ void read_idmap()
 	struct idmapping *p_map2;
 	char nssdb_type_flag[2];
 	char interval_type_flag[2];
+	ssize_t pos;
 	
 	
 	if(mappings_fh != NULL)
@@ -100,9 +101,11 @@ void read_idmap()
 				
 				// TODO: filesystem-based uid/gid mapping
 				
-				if(fscanf(mappings_fh, "%1[ug]id %u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_to) == 3 ||
-				   fscanf(mappings_fh, "%1[ug]id %u-%u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4 ||
-				   fscanf(mappings_fh, "%1[ug]id %u-%u %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5)
+				pos = ftell(mappings_fh);
+				
+				if(fscanf(mappings_fh, "%1[ug]id %u-%u %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5 ||
+				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u-%u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4) ||
+				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_to) == 3))
 				{
 					/* append this mapping */
 					map.nssdb_type = nssdb_type_flag[0] == 'u' ? NSSDB_PASSWD : NSSDB_GROUP;
@@ -117,7 +120,7 @@ void read_idmap()
 				}
 				else
 				{
-					warnx("libnss_idmap: %s: invalid config at offset %d", mappings_file, ftell(mappings_fh));
+					warnx("libnss_idmap: %s: invalid config beginning at offset %d", mappings_file, pos);
 					/* discard current line */
 					fscanf(mappings_fh, "%*[^\n]\n");
 				}
