@@ -359,6 +359,7 @@ void free_pwentries()
 		free(pwentries[idx_entry].pw_shell);
 	}
 	free(pwentries);
+	pwentries = NULL;
 }
 
 enum nss_status
