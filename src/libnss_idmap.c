@@ -9,6 +9,8 @@
 #include <nss.h>
 #include <pwd.h>
 #include <grp.h>
+#include <dlfcn.h>
+
 
 #define FALSE 0
 #define TRUE (!FALSE)
@@ -18,6 +20,19 @@
 #define HANDLE_ERRORS_R if(result == NULL){\
 		if(error == 0) return NSS_STATUS_NOTFOUND;\
 		else { *errnop = error; return NSS_STATUS_UNAVAIL; } }
+
+#define HANDLE_ERRORS_GETENT_R if(result == NULL){\
+		*errnop = error;\
+		if(error == ENOENT) return NSS_STATUS_NOTFOUND;\
+		else return NSS_STATUS_UNAVAIL; }
+
+char * abstrdup(const char *src)
+{
+	char *dst = strdup(src);
+	if(dst == NULL) abort();
+	return dst;
+}
+
 
 /* we store gid_t in uid_t, hopefully they are not so different */
 typedef uid_t id_t;
@@ -48,6 +63,10 @@ static FILE *mappings_fh;
 static time_t mappings_mtime;
 static struct idmapping *idmappings;
 static char *mappings_file = "/etc/nss.d/idmap";
+static struct passwd *pwentries;
+static struct passwd *cur_pwent;
+static struct group *grentries;
+static struct group *cur_grent;
 
 
 void read_idmap()
@@ -198,8 +217,6 @@ void do_idmap_pwd(struct passwd *pwd)
 {
 	do_idmap(NSSDB_PASSWD, (id_t*)&(pwd->pw_uid));
 	do_idmap(NSSDB_GROUP, (id_t*)&(pwd->pw_gid));
-	
-	// FIXME: uid=2000 gid=2000 groups=4294967295,4(adm),...
 }
 
 void do_idmap_grp(struct group *grp)
@@ -245,6 +262,18 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		
 		lookup_uid = uid;
 		do_idmap_reverse(NSSDB_PASSWD, (id_t*)&lookup_uid);
+		
+		if(lookup_uid == uid)
+		{
+			/* there is no uid mapped to the requested uid, 
+			   check if the requested uid maps to something */
+			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_uid);
+			if(lookup_uid != uid)
+			{
+				/* don't show this entry with the UID which has to be replaced */
+				return NSS_STATUS_NOTFOUND;
+			}
+		}
 		
 		passthrough_mode = TRUE;
 		error = getpwuid_r(lookup_uid, result, buffer, buflen, &result);
@@ -295,6 +324,18 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 		lookup_gid = gid;
 		do_idmap_reverse(NSSDB_GROUP, (id_t*)&lookup_gid);
 		
+		if(lookup_gid == gid)
+		{
+			/* there is no gid mapped to the requested gid, 
+			   check if the requested gid maps to something */
+			do_idmap(NSSDB_GROUP, (id_t*)&lookup_gid);
+			if(lookup_gid != gid)
+			{
+				/* don't show this entry with the GID which has to be replaced */
+				return NSS_STATUS_NOTFOUND;
+			}
+		}
+		
 		passthrough_mode = TRUE;
 		error = getgrgid_r(lookup_gid, result, buffer, buflen, &result);
 		passthrough_mode = FALSE;
@@ -306,154 +347,152 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 	}
 }
 
-#if 0
-enum nss_status
-_nss_idmap_endpwent(void)
+void free_pwentries()
 {
-	if() return NSS_STATUS_UNAVAIL;
+	unsigned int idx_entry;
+	for(idx_entry = 0; pwentries != NULL && pwentries[idx_entry].pw_name != NULL; idx_entry++)
+	{
+		free(pwentries[idx_entry].pw_name);
+		free(pwentries[idx_entry].pw_passwd);
+		free(pwentries[idx_entry].pw_gecos);
+		free(pwentries[idx_entry].pw_dir);
+		free(pwentries[idx_entry].pw_shell);
+	}
+	free(pwentries);
 }
 
 enum nss_status
 _nss_idmap_setpwent(int stayopen)
 {
-	return (dir == NULL) ? NSS_STATUS_UNAVAIL : NSS_STATUS_SUCCESS;
+	if(passthrough_mode)
+	{
+		return NSS_STATUS_UNAVAIL;
+	}
+	else
+	{
+		struct passwd *pwd;
+		struct passwd *pwent;
+		unsigned int idx_entry;
+		
+		passthrough_mode = TRUE;
+		free_pwentries();
+		
+		/* load shared library in a separate address space,
+		   because in the main address space setXXent and getXXent are locked at this point */
+		void *lib = dlmopen(LM_ID_NEWLM, "libc.so.6", RTLD_LAZY | RTLD_DEEPBIND);
+		char *e = dlerror();
+		if(e)
+		{
+			warnx("libnss_idmap: %s", e);
+			passthrough_mode = FALSE;
+			return NSS_STATUS_UNAVAIL;
+		}
+		void (* _setpwent)(void) = dlsym(lib, "setpwent");
+		void (* _endpwent)(void) = dlsym(lib, "endpwent");
+		struct passwd * (* _getpwent)(void) = dlsym(lib, "getpwent");
+		
+		_setpwent();
+		
+		/* load passwd entries */
+		idx_entry = 0;
+		while((pwd = _getpwent()) != NULL)
+		{
+			pwentries = realloc(pwentries, (idx_entry+2) * sizeof(struct passwd));
+			if(pwentries == NULL) abort();
+			
+			/* copy over pwd to our static array */
+			pwentries[idx_entry].pw_name = abstrdup(pwd->pw_name);
+			pwentries[idx_entry].pw_passwd = abstrdup(pwd->pw_passwd);
+			pwentries[idx_entry].pw_uid = pwd->pw_uid;
+			pwentries[idx_entry].pw_gid = pwd->pw_gid;
+			pwentries[idx_entry].pw_gecos = abstrdup(pwd->pw_gecos);
+			pwentries[idx_entry].pw_dir = abstrdup(pwd->pw_dir);
+			pwentries[idx_entry].pw_shell = abstrdup(pwd->pw_shell);
+			
+			idx_entry++;
+			pwentries[idx_entry].pw_name = NULL;
+		}
+		
+		cur_pwent = pwentries;
+		_endpwent();
+		dlclose(lib);
+		
+		passthrough_mode = FALSE;
+		return NSS_STATUS_SUCCESS;
+	}
+}
+
+enum nss_status
+_nss_idmap_endpwent()
+{
+	if(passthrough_mode)
+		return NSS_STATUS_UNAVAIL;
+	else
+	{
+		free_pwentries();
+		return NSS_STATUS_SUCCESS;
+	}
+}
+
+void fill_getent_buffer(char ** buffer, char ** dst, char * src)
+{
+	strcpy(*buffer, src);
+	*dst = *buffer;
+	*buffer += strlen(src)+1;
 }
 
 enum nss_status
 _nss_idmap_getpwent_r(struct passwd *result, char *buffer, size_t buflen, int *errnop)
 {
-	char path[PATH_MAX], *line;
-	struct dirent *ent;
-	struct stat st;
-	struct passwd structure;
-	long offset;
-
-	LOCK();
-
-	/* If we don't have a current directory, try to reset. */
-	if (dir == NULL) {
-		setent(TRUE);
-		/* If we couldn't open the directory, then we'd better just
-		 * give up now. */
-		if (dir == NULL) {
-			UNLOCK();
-			return NSS_STATUS_NOTFOUND;
-		}
+	if(passthrough_mode)
+	{
+		return NSS_STATUS_UNAVAIL;
 	}
-
-	do {
-		/* If we don't have a current file, try to open the next file
-		 * in the directory. */
-		if ((fp == NULL) || feof(fp)) {
-			if (fp != NULL) {
-				fclose(fp);
-				fp = NULL;
-			}
-
-			do {
-				/* Read the next entry in the directory. */
-				ent = readdir(dir);
-				if (ent == NULL) {
-					closedir(dir);
-					dir = NULL;
-					continue;
-				}
-
-				/* If the file has a certain name, skip it. */
-				if (skip_file_by_name(ent->d_name)) {
-					continue;
-				}
-
-				/* Formulate the full path name and try to
-				 * open it. */
-				snprintf(path, sizeof(path),
-					 SYSTEM_DATABASE_DIR "/"
-					 DATABASE ".d/%s",
-					 ent->d_name);
-				fp = fopen(path, "r");
-
-				/* If we failed to open the file, move on. */
-				if (fp == NULL) {
-					continue;
-				}
-
-				/* If we can't stat() the file, move on. */
-				if (fstat(fileno(fp), &st) != 0) {
-					fclose(fp);
-					fp = NULL;
-					continue;
-				}
-
-				/* If the file isn't normal or a symlink,
-				 * move on. */
-				if (!S_ISREG(st.st_mode) &&
-				    !S_ISLNK(st.st_mode)) {
-					fclose(fp);
-					fp = NULL;
-					continue;
-				}
-			} while ((dir != NULL) && (fp == NULL));
-		}
-
-		/* If we're out of data, return NOTFOUND. */
-		if ((dir == NULL) || (fp == NULL)) {
-			UNLOCK();
+	else
+	{
+		if(cur_pwent == NULL || cur_pwent->pw_name == NULL)
 			return NSS_STATUS_NOTFOUND;
-		}
-
-		/* Read a line from the file. */
-		offset = ftell(fp);
-		line = read_line(fp);
-		if (line == NULL) {
-			fclose(fp);
-			fp = NULL;
-			continue;
-		}
-
-		/* Check that we have room to save this. */
-		if (strlen(line) >= buflen) {
-			free(line);
-			fseek(fp, offset, SEEK_SET);
-			errno = ERANGE;
+		
+		if(buflen < strlen(cur_pwent->pw_name)+1 + strlen(cur_pwent->pw_passwd)+1 + strlen(cur_pwent->pw_gecos)+1 + strlen(cur_pwent->pw_dir)+1 + strlen(cur_pwent->pw_shell)+1)
+		{
+			/* given buffer is too small */
+			*errnop = ERANGE;
 			return NSS_STATUS_TRYAGAIN;
 		}
+		
+		char * bptr = buffer;
+		
+		fill_getent_buffer(&bptr, &(result->pw_name), cur_pwent->pw_name);
+		fill_getent_buffer(&bptr, &(result->pw_passwd), cur_pwent->pw_passwd);
+		fill_getent_buffer(&bptr, &(result->pw_gecos), cur_pwent->pw_gecos);
+		fill_getent_buffer(&bptr, &(result->pw_dir), cur_pwent->pw_dir);
+		fill_getent_buffer(&bptr, &(result->pw_shell), cur_pwent->pw_shell);
+		result->pw_uid = cur_pwent->pw_uid;
+		result->pw_gid = cur_pwent->pw_gid;
+		
+		do_idmap_pwd(result);
+		
+		/* move pointer forward */
+		cur_pwent = &cur_pwent[1];
+		
+		return NSS_STATUS_SUCCESS;
+	}
+}
 
-		/* Try to parse the line. */
-		strcpy(buffer, line);
-		switch (parse_line(buffer, &structure,
-				   (void *)buffer, buflen,
-				   errnop)) {
-		case -1:
-			/* out of space */
-			free(line);
-			fseek(fp, offset, SEEK_SET);
-			errno = ERANGE;
-			return NSS_STATUS_TRYAGAIN;
-			break;
-		case 0:
-			/* parse error (invalid format) */
-			free(line);
-			line = NULL;
-			continue;
-			break;
-		case 1:
-			/* success */
-			free(line);
-			*result = structure;
-			UNLOCK();
-			return NSS_STATUS_SUCCESS;
-			break;
-		default:
-			break;
-		}
+enum nss_status
+_nss_idmap_setgrent(int stayopen)
+{
+	return NSS_STATUS_SUCCESS;
+}
 
-		/* Try the next entry. */
-		free(line);
-		line = NULL;
-	} while (1);
+enum nss_status
+_nss_idmap_endgrent()
+{
+	return NSS_STATUS_SUCCESS;
+}
 
-	/* We never really get here, but oh well. */
-	UNLOCK();
+enum nss_status
+_nss_idmap_getgrent_r(struct passwd *result, char *buffer, size_t buflen, int *errnop)
+{
 	return NSS_STATUS_UNAVAIL;
 }
-#endif
