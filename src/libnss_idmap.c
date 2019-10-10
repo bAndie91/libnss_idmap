@@ -15,6 +15,9 @@
 #define FALSE 0
 #define TRUE (!FALSE)
 
+/* where to load secondary setXXent/getXXent/endXXent symbols from */
+#define LIBC_NAME "libc.so.6"
+
 #define ZERO(x) do{memset(&x, 0, sizeof(x));}while(0)
 
 #define HANDLE_ERRORS_R if(result == NULL){\
@@ -118,7 +121,12 @@ void read_idmap()
 				ZERO(nssdb_type_flag);
 				ZERO(interval_type_flag);
 				
-				// TODO: filesystem-based uid/gid mapping
+				// TODO: filesystem-based uid/gid mapping, eg.
+				//   "uid $HOME"
+				//   "uid /home/%s"
+				//   "uid /etc/nss.d/idmap.d/passwd/%u"
+				//   "gid /etc/nss.d/idmap.d/group/%u"
+				// TODO: force hide UID
 				
 				pos = ftell(mappings_fh);
 				
@@ -380,7 +388,7 @@ _nss_idmap_setpwent(int stayopen)
 		
 		/* load shared library in a separate address space,
 		   because in the main address space setXXent and getXXent are locked at this point */
-		void *lib = dlmopen(LM_ID_NEWLM, "libc.so.6", RTLD_LAZY | RTLD_DEEPBIND);
+		void *libc = dlmopen(LM_ID_NEWLM, LIBC_NAME, RTLD_LAZY | RTLD_DEEPBIND);
 		char *e = dlerror();
 		if(e)
 		{
@@ -388,13 +396,12 @@ _nss_idmap_setpwent(int stayopen)
 			passthrough_mode = FALSE;
 			return NSS_STATUS_UNAVAIL;
 		}
-		void (* _setpwent)(void) = dlsym(lib, "setpwent");
-		void (* _endpwent)(void) = dlsym(lib, "endpwent");
-		struct passwd * (* _getpwent)(void) = dlsym(lib, "getpwent");
+		void (* _setpwent)(void) = dlsym(libc, "setpwent");
+		void (* _endpwent)(void) = dlsym(libc, "endpwent");
+		struct passwd * (* _getpwent)(void) = dlsym(libc, "getpwent");
 		
+		/* load passwd entries from upstream module into memory */
 		_setpwent();
-		
-		/* load passwd entries */
 		idx_entry = 0;
 		while((pwd = _getpwent()) != NULL)
 		{
@@ -414,9 +421,11 @@ _nss_idmap_setpwent(int stayopen)
 			pwentries[idx_entry].pw_name = NULL;
 		}
 		
+		/* point pw entry pointer to the beginning of the array */
 		cur_pwent = pwentries;
+		/* close secondary address space */
 		_endpwent();
-		dlclose(lib);
+		dlclose(libc);
 		
 		passthrough_mode = FALSE;
 		return NSS_STATUS_SUCCESS;
@@ -437,6 +446,10 @@ _nss_idmap_endpwent()
 
 void fill_getent_buffer(char ** buffer, char ** dst, char * src)
 {
+	/* copy src into buffer,
+	   point dst to the copy,
+	   move buffer pointer to the remaining free space.
+	   check buffer size in prior. */
 	strcpy(*buffer, src);
 	*dst = *buffer;
 	*buffer += strlen(src)+1;
@@ -452,6 +465,8 @@ _nss_idmap_getpwent_r(struct passwd *result, char *buffer, size_t buflen, int *e
 	else
 	{
 		if(cur_pwent == NULL || cur_pwent->pw_name == NULL)
+			/* we're out of pw entries */
+			/* ensure there is "[NOTFOUND=return]" in nsswitch.conf to avoid duplicate entries */
 			return NSS_STATUS_NOTFOUND;
 		
 		if(buflen < strlen(cur_pwent->pw_name)+1 + strlen(cur_pwent->pw_passwd)+1 + strlen(cur_pwent->pw_gecos)+1 + strlen(cur_pwent->pw_dir)+1 + strlen(cur_pwent->pw_shell)+1)
@@ -472,6 +487,8 @@ _nss_idmap_getpwent_r(struct passwd *result, char *buffer, size_t buflen, int *e
 		result->pw_gid = cur_pwent->pw_gid;
 		
 		do_idmap_pwd(result);
+		
+		// TODO: hide users with UID we translate other UIDs into?
 		
 		/* move pointer forward */
 		cur_pwent = &cur_pwent[1];
