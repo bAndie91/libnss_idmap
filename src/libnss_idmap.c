@@ -18,7 +18,7 @@
 /* where to load secondary setXXent/getXXent/endXXent symbols from */
 #define LIBC_NAME "libc.so.6"
 
-#define ZERO(x) do{memset(&x, 0, sizeof(x));}while(0)
+#define ZERO(x) do{memset(&(x), 0, sizeof(x));}while(0)
 
 #define HANDLE_ERRORS_R if(result == NULL){\
 		if(error == 0) return NSS_STATUS_NOTFOUND;\
@@ -355,6 +355,17 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 	}
 }
 
+void fill_getent_buffer(char ** buffer, char ** dst, char * src)
+{
+	/* copy src into buffer,
+	   point dst to the copy,
+	   move buffer pointer to the remaining free space.
+	   check buffer size in prior. */
+	strcpy(*buffer, src);
+	*dst = *buffer;
+	*buffer += strlen(src)+1;
+}
+
 void free_pwentries()
 {
 	unsigned int idx_entry;
@@ -370,147 +381,115 @@ void free_pwentries()
 	pwentries = NULL;
 }
 
-enum nss_status
-_nss_idmap_setpwent(int stayopen)
+void free_grentries()
 {
-	if(passthrough_mode)
+	unsigned int idx_entry;
+	for(idx_entry = 0; grentries != NULL && grentries[idx_entry].gr_name != NULL; idx_entry++)
 	{
-		return NSS_STATUS_UNAVAIL;
+		free(grentries[idx_entry].gr_name);
+		free(grentries[idx_entry].gr_passwd);
+		// TODO: free gr_mem
 	}
-	else
-	{
-		struct passwd *pwd;
-		struct passwd *pwent;
-		unsigned int idx_entry;
-		
-		passthrough_mode = TRUE;
-		free_pwentries();
-		
-		/* load shared library in a separate address space,
-		   because in the main address space setXXent and getXXent are locked at this point */
-		void *libc = dlmopen(LM_ID_NEWLM, LIBC_NAME, RTLD_LAZY | RTLD_DEEPBIND);
-		char *e = dlerror();
-		if(e)
-		{
-			warnx("libnss_idmap: %s", e);
-			passthrough_mode = FALSE;
-			return NSS_STATUS_UNAVAIL;
-		}
-		void (* _setpwent)(void) = dlsym(libc, "setpwent");
-		void (* _endpwent)(void) = dlsym(libc, "endpwent");
-		struct passwd * (* _getpwent)(void) = dlsym(libc, "getpwent");
-		
-		/* load passwd entries from upstream module into memory */
-		_setpwent();
-		idx_entry = 0;
-		while((pwd = _getpwent()) != NULL)
-		{
-			pwentries = realloc(pwentries, (idx_entry+2) * sizeof(struct passwd));
-			if(pwentries == NULL) abort();
-			
-			/* copy over pwd to our static array */
-			pwentries[idx_entry].pw_name = abstrdup(pwd->pw_name);
-			pwentries[idx_entry].pw_passwd = abstrdup(pwd->pw_passwd);
-			pwentries[idx_entry].pw_uid = pwd->pw_uid;
-			pwentries[idx_entry].pw_gid = pwd->pw_gid;
-			pwentries[idx_entry].pw_gecos = abstrdup(pwd->pw_gecos);
-			pwentries[idx_entry].pw_dir = abstrdup(pwd->pw_dir);
-			pwentries[idx_entry].pw_shell = abstrdup(pwd->pw_shell);
-			
-			idx_entry++;
-			pwentries[idx_entry].pw_name = NULL;
-		}
-		
-		/* point pw entry pointer to the beginning of the array */
-		cur_pwent = pwentries;
-		/* close secondary address space */
-		_endpwent();
-		dlclose(libc);
-		
-		passthrough_mode = FALSE;
-		return NSS_STATUS_SUCCESS;
-	}
+	free(grentries);
+	grentries = NULL;
 }
 
-enum nss_status
-_nss_idmap_endpwent()
+void copy_pwent(struct passwd *dst, struct passwd *src)
 {
-	if(passthrough_mode)
-		return NSS_STATUS_UNAVAIL;
-	else
-	{
-		free_pwentries();
-		return NSS_STATUS_SUCCESS;
-	}
+	/* copy over pwd to our static array */
+	dst->pw_name = abstrdup(src->pw_name);
+	dst->pw_passwd = abstrdup(src->pw_passwd);
+	dst->pw_uid = src->pw_uid;
+	dst->pw_gid = src->pw_gid;
+	dst->pw_gecos = abstrdup(src->pw_gecos);
+	dst->pw_dir = abstrdup(src->pw_dir);
+	dst->pw_shell = abstrdup(src->pw_shell);
 }
 
-void fill_getent_buffer(char ** buffer, char ** dst, char * src)
+void copy_grent(struct group *dst, struct group *src)
 {
-	/* copy src into buffer,
-	   point dst to the copy,
-	   move buffer pointer to the remaining free space.
-	   check buffer size in prior. */
-	strcpy(*buffer, src);
-	*dst = *buffer;
-	*buffer += strlen(src)+1;
+	/* copy over grp to our static array */
+	dst->gr_name = abstrdup(src->gr_name);
+	dst->gr_passwd = abstrdup(src->gr_passwd);
+	dst->gr_gid = src->gr_gid;
+	// TODO: gr_mem
 }
 
-enum nss_status
-_nss_idmap_getpwent_r(struct passwd *result, char *buffer, size_t buflen, int *errnop)
+size_t sizeof_passwd(struct passwd *pwent)
 {
-	if(passthrough_mode)
-	{
-		return NSS_STATUS_UNAVAIL;
-	}
-	else
-	{
-		if(cur_pwent == NULL || cur_pwent->pw_name == NULL)
-			/* we're out of pw entries */
-			/* ensure there is "[NOTFOUND=return]" in nsswitch.conf to avoid duplicate entries */
-			return NSS_STATUS_NOTFOUND;
-		
-		if(buflen < strlen(cur_pwent->pw_name)+1 + strlen(cur_pwent->pw_passwd)+1 + strlen(cur_pwent->pw_gecos)+1 + strlen(cur_pwent->pw_dir)+1 + strlen(cur_pwent->pw_shell)+1)
-		{
-			/* given buffer is too small */
-			*errnop = ERANGE;
-			return NSS_STATUS_TRYAGAIN;
-		}
-		
-		char * bptr = buffer;
-		
-		fill_getent_buffer(&bptr, &(result->pw_name), cur_pwent->pw_name);
-		fill_getent_buffer(&bptr, &(result->pw_passwd), cur_pwent->pw_passwd);
-		fill_getent_buffer(&bptr, &(result->pw_gecos), cur_pwent->pw_gecos);
-		fill_getent_buffer(&bptr, &(result->pw_dir), cur_pwent->pw_dir);
-		fill_getent_buffer(&bptr, &(result->pw_shell), cur_pwent->pw_shell);
-		result->pw_uid = cur_pwent->pw_uid;
-		result->pw_gid = cur_pwent->pw_gid;
-		
-		do_idmap_pwd(result);
-		
-		// TODO: hide users with UID we translate other UIDs into?
-		
-		/* move pointer forward */
-		cur_pwent = &cur_pwent[1];
-		
-		return NSS_STATUS_SUCCESS;
-	}
+	return strlen(pwent->pw_name)+1 
+	  + strlen(pwent->pw_passwd)+1 
+	  + strlen(pwent->pw_gecos)+1 
+	  + strlen(pwent->pw_dir)+1 
+	  + strlen(pwent->pw_shell)+1;
 }
 
-enum nss_status
-_nss_idmap_setgrent(int stayopen)
+size_t sizeof_group(struct group *grent)
 {
-	return NSS_STATUS_SUCCESS;
+	return strlen(grent->gr_name)+1 
+	  + strlen(grent->gr_passwd)+1
+	  // TODO: gr_mem
+	  ;
 }
 
-enum nss_status
-_nss_idmap_endgrent()
+void copy_passwd_to_result(char * buffer, struct passwd * result, struct passwd *pwent)
 {
-	return NSS_STATUS_SUCCESS;
+	char * bptr = buffer;
+	
+	fill_getent_buffer(&bptr, &(result->pw_name), pwent->pw_name);
+	fill_getent_buffer(&bptr, &(result->pw_passwd), pwent->pw_passwd);
+	fill_getent_buffer(&bptr, &(result->pw_gecos), pwent->pw_gecos);
+	fill_getent_buffer(&bptr, &(result->pw_dir), pwent->pw_dir);
+	fill_getent_buffer(&bptr, &(result->pw_shell), pwent->pw_shell);
+	result->pw_uid = pwent->pw_uid;
+	result->pw_gid = pwent->pw_gid;
 }
 
-enum nss_status
-_nss_idmap_getgrent_r(struct passwd *result, char *buffer, size_t buflen, int *errnop)
+void copy_group_to_result(char * buffer, struct group * result, struct group *grent)
 {
-	return NSS_STATUS_UNAVAIL;
+	char * bptr = buffer;
+	
+	fill_getent_buffer(&bptr, &(result->gr_name), grent->gr_name);
+	fill_getent_buffer(&bptr, &(result->gr_passwd), grent->gr_passwd);
+	result->gr_gid = grent->gr_gid;
+	// TODO: gr_mem
 }
+
+
+#define STRUCTNAME struct passwd
+#define FREE_ENTRIES free_pwentries
+#define SETENTNAME "setpwent"
+#define ENDENTNAME "endpwent"
+#define GETENTNAME "getpwent"
+#define MOD_SETENT _nss_idmap_setpwent
+#define MOD_ENDENT _nss_idmap_endpwent
+#define MOD_GETENT _nss_idmap_getpwent_r
+#define COPY_STRUCT copy_pwent
+#define GETENT_ARRAY pwentries
+#define GETENT_POINTER cur_pwent
+#define GETENT_NAME_MEMBER cur_pwent->pw_name
+#define DO_IDMAP do_idmap_pwd
+#define SIZEOF_ENTRY sizeof_passwd
+#define COPY_TO_RESULT copy_passwd_to_result
+
+#include "getent.c"
+
+#include "undef.c"
+
+#define STRUCTNAME struct group
+#define FREE_ENTRIES free_grentries
+#define SETENTNAME "setgrent"
+#define ENDENTNAME "endgrent"
+#define GETENTNAME "getgrent"
+#define MOD_SETENT _nss_idmap_setgrent
+#define MOD_ENDENT _nss_idmap_endgrent
+#define MOD_GETENT _nss_idmap_getgrent_r
+#define COPY_STRUCT copy_grent
+#define GETENT_ARRAY grentries
+#define GETENT_POINTER cur_grent
+#define GETENT_NAME_MEMBER cur_grent->gr_name
+#define DO_IDMAP do_idmap_grp
+#define SIZEOF_ENTRY sizeof_group
+#define COPY_TO_RESULT copy_group_to_result
+
+#include "getent.c"
