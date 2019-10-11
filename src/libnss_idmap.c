@@ -380,7 +380,7 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 		
 		if(lookup_gid == gid)
 		{
-			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_gid, &hide);
+			do_idmap(NSSDB_GROUP, (id_t*)&lookup_gid, &hide);
 			if(lookup_gid != gid || hide)
 			{
 				return NSS_STATUS_NOTFOUND;
