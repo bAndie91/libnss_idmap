@@ -10,6 +10,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <dlfcn.h>
+#include <err.h>
 
 
 #define FALSE 0
@@ -34,6 +35,13 @@ char * abstrdup(const char *src)
 	char *dst = strdup(src);
 	if(dst == NULL) abort();
 	return dst;
+}
+
+void * abmalloc(size_t size)
+{
+	void * p = malloc(size);
+	if(p == NULL) abort();
+	return p;
 }
 
 
@@ -138,8 +146,7 @@ void read_idmap()
 					map.nssdb_type = nssdb_type_flag[0] == 'u' ? NSSDB_PASSWD : NSSDB_GROUP;
 					map.intv = interval_type_flag[0] == '-' ? MAPINTV_N_TO_N : MAPINTV_N_TO_1;
 					
-					p_map2 = malloc(sizeof(struct idmapping));
-					if(p_map2 == NULL) abort();
+					p_map2 = abmalloc(sizeof(struct idmapping));
 					if(idmappings == NULL) idmappings = p_map2;
 					else p_map1->next = p_map2;
 					memcpy(p_map2, &map, sizeof(struct idmapping));
@@ -355,15 +362,35 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 	}
 }
 
-void fill_getent_buffer(char ** buffer, char ** dst, char * src)
+void copy_pwent(struct passwd *dst, struct passwd *src)
 {
-	/* copy src into buffer,
-	   point dst to the copy,
-	   move buffer pointer to the remaining free space.
-	   check buffer size in prior. */
-	strcpy(*buffer, src);
-	*dst = *buffer;
-	*buffer += strlen(src)+1;
+	/* copy over pwd to our static array */
+	dst->pw_name = abstrdup(src->pw_name);
+	dst->pw_passwd = abstrdup(src->pw_passwd);
+	dst->pw_uid = src->pw_uid;
+	dst->pw_gid = src->pw_gid;
+	dst->pw_gecos = abstrdup(src->pw_gecos);
+	dst->pw_dir = abstrdup(src->pw_dir);
+	dst->pw_shell = abstrdup(src->pw_shell);
+}
+
+void copy_grent(struct group *dst, struct group *src)
+{
+	/* copy over grp to our static array */
+	unsigned int idx_mem;
+	
+	dst->gr_name = abstrdup(src->gr_name);
+	dst->gr_passwd = abstrdup(src->gr_passwd);
+	dst->gr_gid = src->gr_gid;
+	
+	dst->gr_mem = abmalloc(sizeof(void*));
+	for(idx_mem = 0; src->gr_mem != NULL && src->gr_mem[idx_mem] != NULL; idx_mem++)
+	{
+		dst->gr_mem = realloc(dst->gr_mem, (idx_mem+2) * sizeof(void*));
+		if(dst->gr_mem == NULL) abort();
+		dst->gr_mem[idx_mem] = abstrdup(src->gr_mem[idx_mem]);
+	}
+	dst->gr_mem[idx_mem] = NULL;
 }
 
 void free_pwentries()
@@ -383,40 +410,22 @@ void free_pwentries()
 
 void free_grentries()
 {
-	unsigned int idx_entry;
+	unsigned int idx_entry, idx_mem;
 	for(idx_entry = 0; grentries != NULL && grentries[idx_entry].gr_name != NULL; idx_entry++)
 	{
-		free(grentries[idx_entry].gr_name);
+		for(idx_mem = 0; grentries[idx_entry].gr_mem != NULL && grentries[idx_entry].gr_mem[idx_mem] != NULL; idx_mem++)
+			free(grentries[idx_entry].gr_mem[idx_mem]);
+		free(grentries[idx_entry].gr_mem);
 		free(grentries[idx_entry].gr_passwd);
-		// TODO: free gr_mem
+		free(grentries[idx_entry].gr_name);
 	}
 	free(grentries);
 	grentries = NULL;
 }
 
-void copy_pwent(struct passwd *dst, struct passwd *src)
-{
-	/* copy over pwd to our static array */
-	dst->pw_name = abstrdup(src->pw_name);
-	dst->pw_passwd = abstrdup(src->pw_passwd);
-	dst->pw_uid = src->pw_uid;
-	dst->pw_gid = src->pw_gid;
-	dst->pw_gecos = abstrdup(src->pw_gecos);
-	dst->pw_dir = abstrdup(src->pw_dir);
-	dst->pw_shell = abstrdup(src->pw_shell);
-}
-
-void copy_grent(struct group *dst, struct group *src)
-{
-	/* copy over grp to our static array */
-	dst->gr_name = abstrdup(src->gr_name);
-	dst->gr_passwd = abstrdup(src->gr_passwd);
-	dst->gr_gid = src->gr_gid;
-	// TODO: gr_mem
-}
-
 size_t sizeof_passwd(struct passwd *pwent)
 {
+	/* return the minimum buffer size which can hold all the strings in the given passwd struct */
 	return strlen(pwent->pw_name)+1 
 	  + strlen(pwent->pw_passwd)+1 
 	  + strlen(pwent->pw_gecos)+1 
@@ -426,10 +435,28 @@ size_t sizeof_passwd(struct passwd *pwent)
 
 size_t sizeof_group(struct group *grent)
 {
+	/* return the minimum buffer size which can hold all the strings in the given group struct */
+	size_t size_members;
+	unsigned int idx_mem;
+	
+	size_members = 0;
+	for(idx_mem = 0; grent->gr_mem != NULL && grent->gr_mem[idx_mem] != NULL; idx_mem++)
+		size_members += sizeof(void*) + strlen(grent->gr_mem[idx_mem]) + 1;
+	
 	return strlen(grent->gr_name)+1 
 	  + strlen(grent->gr_passwd)+1
-	  // TODO: gr_mem
-	  ;
+	  + size_members;
+}
+
+void fill_getent_buffer(char ** buffer, char ** dst, char * src)
+{
+	/* copy src into buffer,
+	   point dst to the copy,
+	   move buffer pointer to the remaining free space.
+	   check buffer size in prior. */
+	strcpy(*buffer, src);
+	if(dst != NULL) *dst = *buffer;
+	*buffer += strlen(src)+1;
 }
 
 void copy_passwd_to_result(char * buffer, struct passwd * result, struct passwd *pwent)
@@ -447,12 +474,25 @@ void copy_passwd_to_result(char * buffer, struct passwd * result, struct passwd 
 
 void copy_group_to_result(char * buffer, struct group * result, struct group *grent)
 {
-	char * bptr = buffer;
+	char * buf_ptr = buffer;
+	unsigned int idx_mem;
+	char * mem_ptr;
 	
-	fill_getent_buffer(&bptr, &(result->gr_name), grent->gr_name);
-	fill_getent_buffer(&bptr, &(result->gr_passwd), grent->gr_passwd);
+	fill_getent_buffer(&buf_ptr, &(result->gr_name), grent->gr_name);
+	fill_getent_buffer(&buf_ptr, &(result->gr_passwd), grent->gr_passwd);
 	result->gr_gid = grent->gr_gid;
-	// TODO: gr_mem
+	mem_ptr = buf_ptr;
+	for(idx_mem = 0; grent->gr_mem != NULL && grent->gr_mem[idx_mem] != NULL; idx_mem++)
+	{
+		fill_getent_buffer(&buf_ptr, NULL, grent->gr_mem[idx_mem]);
+	}
+	result->gr_mem = (char**)buf_ptr;
+	for(idx_mem = 0; grent->gr_mem != NULL && grent->gr_mem[idx_mem] != NULL; idx_mem++)
+	{
+		result->gr_mem[idx_mem] = mem_ptr;
+		mem_ptr = (char*)(mem_ptr + strlen(mem_ptr) + 1);
+	}
+	result->gr_mem[idx_mem] = NULL;
 }
 
 
@@ -461,13 +501,13 @@ void copy_group_to_result(char * buffer, struct group * result, struct group *gr
 #define SETENTNAME "setpwent"
 #define ENDENTNAME "endpwent"
 #define GETENTNAME "getpwent"
-#define MOD_SETENT _nss_idmap_setpwent
-#define MOD_ENDENT _nss_idmap_endpwent
-#define MOD_GETENT _nss_idmap_getpwent_r
+#define IDMAP_SETENT _nss_idmap_setpwent
+#define IDMAP_ENDENT _nss_idmap_endpwent
+#define IDMAP_GETENT _nss_idmap_getpwent_r
 #define COPY_STRUCT copy_pwent
 #define GETENT_ARRAY pwentries
 #define GETENT_POINTER cur_pwent
-#define GETENT_NAME_MEMBER cur_pwent->pw_name
+#define GETENT_NAME pw_name
 #define DO_IDMAP do_idmap_pwd
 #define SIZEOF_ENTRY sizeof_passwd
 #define COPY_TO_RESULT copy_passwd_to_result
@@ -481,13 +521,13 @@ void copy_group_to_result(char * buffer, struct group * result, struct group *gr
 #define SETENTNAME "setgrent"
 #define ENDENTNAME "endgrent"
 #define GETENTNAME "getgrent"
-#define MOD_SETENT _nss_idmap_setgrent
-#define MOD_ENDENT _nss_idmap_endgrent
-#define MOD_GETENT _nss_idmap_getgrent_r
+#define IDMAP_SETENT _nss_idmap_setgrent
+#define IDMAP_ENDENT _nss_idmap_endgrent
+#define IDMAP_GETENT _nss_idmap_getgrent_r
 #define COPY_STRUCT copy_grent
 #define GETENT_ARRAY grentries
 #define GETENT_POINTER cur_grent
-#define GETENT_NAME_MEMBER cur_grent->gr_name
+#define GETENT_NAME gr_name
 #define DO_IDMAP do_idmap_grp
 #define SIZEOF_ENTRY sizeof_group
 #define COPY_TO_RESULT copy_group_to_result

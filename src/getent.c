@@ -1,5 +1,5 @@
 enum nss_status
-MOD_SETENT(int stayopen)
+IDMAP_SETENT(int stayopen)
 {
 	if(passthrough_mode)
 	{
@@ -38,7 +38,7 @@ MOD_SETENT(int stayopen)
 			COPY_STRUCT(&(GETENT_ARRAY[idx_entry]), entry);
 			
 			idx_entry++;
-			GETENT_NAME_MEMBER = NULL;
+			GETENT_ARRAY[idx_entry].GETENT_NAME = NULL;
 		}
 		
 		/* point pw entry pointer to the beginning of the array */
@@ -53,7 +53,7 @@ MOD_SETENT(int stayopen)
 }
 
 enum nss_status
-MOD_ENDENT()
+IDMAP_ENDENT()
 {
 	if(passthrough_mode)
 		return NSS_STATUS_UNAVAIL;
@@ -65,7 +65,7 @@ MOD_ENDENT()
 }
 
 enum nss_status
-MOD_GETENT(STRUCTNAME *result, char *buffer, size_t buflen, int *errnop)
+IDMAP_GETENT(STRUCTNAME *result, char *buffer, size_t buflen, int *errnop)
 {
 	if(passthrough_mode)
 	{
@@ -73,7 +73,7 @@ MOD_GETENT(STRUCTNAME *result, char *buffer, size_t buflen, int *errnop)
 	}
 	else
 	{
-		if(GETENT_POINTER == NULL || GETENT_NAME_MEMBER == NULL)
+		if(GETENT_POINTER == NULL || GETENT_POINTER->GETENT_NAME == NULL)
 		{
 			/* we're out of pw/gr entries */
 			/* ensure there is "[NOTFOUND=return]" in nsswitch.conf to avoid duplicate entries */
