@@ -128,6 +128,7 @@ void read_idmap()
 				ZERO(map);
 				ZERO(nssdb_type_flag);
 				ZERO(interval_type_flag);
+				ZERO(cbuf);
 				
 				// TODO: filesystem-based uid/gid mapping, eg.
 				//   "uid $HOME"
@@ -137,6 +138,11 @@ void read_idmap()
 				// TODO: force hide UID
 				
 				pos = ftell(mappings_fh);
+				
+				if((fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[#]%*[^\n]%1[\n]", cbuf, cbuf) == 2) ||
+				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[#]%1[\n]", cbuf, cbuf) == 2) ||
+				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[\n]", cbuf) == 1))
+					continue;
 				
 				if(fscanf(mappings_fh, "%1[ug]id %u-%u %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5 ||
 				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u-%u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4) ||
