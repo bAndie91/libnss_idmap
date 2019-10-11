@@ -48,6 +48,8 @@ void * abmalloc(size_t size)
 /* we store gid_t in uid_t, hopefully they are not so different */
 typedef uid_t id_t;
 
+typedef char bool;
+
 enum nssdb_type {
 	NSSDB_PASSWD,
 	NSSDB_GROUP,
@@ -64,6 +66,7 @@ struct idmapping {
 	id_t id_from_end;
 	id_t id_to;
 	enum mapping_interval intv;
+	bool hide;
 	struct idmapping *next;
 };
 
@@ -88,6 +91,8 @@ void read_idmap()
 	struct idmapping *p_map2;
 	char nssdb_type_flag[2];
 	char interval_type_flag[2];
+	char hide_flag[2];
+	char cbuf[2];
 	ssize_t pos;
 	
 	
@@ -128,14 +133,15 @@ void read_idmap()
 				ZERO(map);
 				ZERO(nssdb_type_flag);
 				ZERO(interval_type_flag);
+				ZERO(hide_flag);
 				ZERO(cbuf);
 				
 				// TODO: filesystem-based uid/gid mapping, eg.
-				//   "uid $HOME"
-				//   "uid /home/%s"
-				//   "uid /etc/nss.d/idmap.d/passwd/%u"
-				//   "gid /etc/nss.d/idmap.d/group/%u"
-				// TODO: force hide UID
+				//   "uid by home"
+				//   "uid by file /home/%s"
+				//   "uid by file /etc/nss.d/idmap.d/passwd/%u"
+				//   "gid by file /etc/nss.d/idmap.d/group/%u"
+				// TODO: map by name
 				
 				pos = ftell(mappings_fh);
 				
@@ -144,13 +150,16 @@ void read_idmap()
 				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[\n]", cbuf) == 1))
 					continue;
 				
-				if(fscanf(mappings_fh, "%1[ug]id %u-%u %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5 ||
+				if((fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u-%u %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5) ||
+				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u-%u %1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, hide_flag) == 4) ||
 				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u-%u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4) ||
+				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u %1[-] \n", nssdb_type_flag, &map.id_from_start, hide_flag) == 3) ||
 				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_to) == 3))
 				{
 					/* append this mapping */
 					map.nssdb_type = nssdb_type_flag[0] == 'u' ? NSSDB_PASSWD : NSSDB_GROUP;
 					map.intv = interval_type_flag[0] == '-' ? MAPINTV_N_TO_N : MAPINTV_N_TO_1;
+					map.hide = hide_flag[0] == '-' ? TRUE : FALSE;
 					
 					p_map2 = abmalloc(sizeof(struct idmapping));
 					if(idmappings == NULL) idmappings = p_map2;
@@ -169,11 +178,12 @@ void read_idmap()
 	}
 }
 
-void do_idmap(enum nssdb_type nssdb_type, id_t *id)
+void do_idmap(enum nssdb_type nssdb_type, id_t *id, bool *hide)
 {
 	struct idmapping *p_map;
 	
 	read_idmap();
+	if(hide != NULL) *hide = FALSE;
 	
 	for(p_map = idmappings; p_map != NULL; p_map = p_map->next)
 	{
@@ -186,15 +196,25 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id)
 				printf(stderr, "libnss_idmap: forward map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
-				if(p_map->intv == MAPINTV_N_TO_1)
-					*id = p_map->id_to;
+				if(p_map->hide)
+				{
+					if(hide != NULL) *hide = TRUE;
+					
+					#ifdef DEBUG
+					printf(stderr, "to -\n");
+					#endif
+				}
 				else
-					*id = p_map->id_to + (*id - p_map->id_from_start);
-				
-				#ifdef DEBUG
-				printf(stderr, "to %d\n", *id);
-				#endif
-				
+				{
+					if(p_map->intv == MAPINTV_N_TO_1)
+						*id = p_map->id_to;
+					else
+						*id = p_map->id_to + (*id - p_map->id_from_start);
+					
+					#ifdef DEBUG
+					printf(stderr, "to %d\n", *id);
+					#endif
+				}
 				break;
 			}
 		}
@@ -234,15 +254,15 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 	}
 }
 
-void do_idmap_pwd(struct passwd *pwd)
+void do_idmap_pwd(struct passwd *pwd, bool *hide)
 {
-	do_idmap(NSSDB_PASSWD, (id_t*)&(pwd->pw_uid));
-	do_idmap(NSSDB_GROUP, (id_t*)&(pwd->pw_gid));
+	do_idmap(NSSDB_PASSWD, (id_t*)&(pwd->pw_uid), hide);
+	do_idmap(NSSDB_GROUP, (id_t*)&(pwd->pw_gid), NULL);
 }
 
-void do_idmap_grp(struct group *grp)
+void do_idmap_grp(struct group *grp, bool *hide)
 {
-	do_idmap(NSSDB_GROUP, (id_t*)&(grp->gr_gid));
+	do_idmap(NSSDB_GROUP, (id_t*)&(grp->gr_gid), hide);
 }
 
 
@@ -257,13 +277,15 @@ _nss_idmap_getpwnam_r(const char *name, struct passwd *result, char *buffer, siz
 	else
 	{
 		int error;
+		bool hide;
 		
 		passthrough_mode = TRUE;
 		error = getpwnam_r(name, result, buffer, buflen, &result);
 		passthrough_mode = FALSE;
 		HANDLE_ERRORS_R;
 		
-		do_idmap_pwd(result);
+		do_idmap_pwd(result, &hide);
+		if(hide) return NSS_STATUS_NOTFOUND;
 		
 		return NSS_STATUS_SUCCESS;
 	}
@@ -280,18 +302,22 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 	{
 		int error;
 		uid_t lookup_uid;
+		bool hide;
 		
+		/* lookup which UID would map to the requested UID 
+		   and get that one from the upstream modules */
 		lookup_uid = uid;
 		do_idmap_reverse(NSSDB_PASSWD, (id_t*)&lookup_uid);
 		
 		if(lookup_uid == uid)
 		{
-			/* there is no uid mapped to the requested uid, 
-			   check if the requested uid maps to something */
-			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_uid);
-			if(lookup_uid != uid)
+			/* there is no UID mapped to the requested UID,
+			   check if the requested UID maps to something else */
+			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_uid, &hide);
+			if(lookup_uid != uid || hide)
 			{
-				/* don't show this entry with the UID which has to be replaced */
+				/* don't show this entry, because it has an UID 
+				   which has to be replaced or hidden */
 				return NSS_STATUS_NOTFOUND;
 			}
 		}
@@ -301,8 +327,10 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		passthrough_mode = FALSE;
 		HANDLE_ERRORS_R;
 		
-		result->pw_uid = uid;
-		do_idmap(NSSDB_GROUP, (id_t*)&(result->pw_gid));
+		/* Note: you won't necessarily get back the requested UID
+		   if you defined N:1 mapping to the requested UID. */
+		do_idmap_pwd(result, &hide);
+		if(hide) return NSS_STATUS_NOTFOUND;
 		
 		return NSS_STATUS_SUCCESS;
 	}
@@ -318,13 +346,15 @@ _nss_idmap_getgrnam_r(const char *name, struct group *result, char *buffer, size
 	else
 	{
 		int error;
+		bool hide;
 		
 		passthrough_mode = TRUE;
 		error = getgrnam_r(name, result, buffer, buflen, &result);
 		passthrough_mode = FALSE;
 		HANDLE_ERRORS_R;
 		
-		do_idmap_grp(result);
+		do_idmap_grp(result, &hide);
+		if(hide) return NSS_STATUS_NOTFOUND;
 		
 		return NSS_STATUS_SUCCESS;
 	}
@@ -341,18 +371,18 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 	{
 		int error;
 		gid_t lookup_gid;
+		bool hide;
 		
+		/* perform reverse mapping.
+		   see comments in _nss_idmap_getpwuid_r(). */
 		lookup_gid = gid;
 		do_idmap_reverse(NSSDB_GROUP, (id_t*)&lookup_gid);
 		
 		if(lookup_gid == gid)
 		{
-			/* there is no gid mapped to the requested gid, 
-			   check if the requested gid maps to something */
-			do_idmap(NSSDB_GROUP, (id_t*)&lookup_gid);
-			if(lookup_gid != gid)
+			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_gid, &hide);
+			if(lookup_gid != gid || hide)
 			{
-				/* don't show this entry with the GID which has to be replaced */
 				return NSS_STATUS_NOTFOUND;
 			}
 		}
@@ -362,7 +392,8 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 		passthrough_mode = FALSE;
 		HANDLE_ERRORS_R;
 		
-		result->gr_gid = gid;
+		do_idmap_grp(result, &hide);
+		if(hide) return NSS_STATUS_NOTFOUND;
 		
 		return NSS_STATUS_SUCCESS;
 	}

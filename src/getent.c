@@ -73,29 +73,34 @@ IDMAP_GETENT(STRUCTNAME *result, char *buffer, size_t buflen, int *errnop)
 	}
 	else
 	{
-		if(GETENT_POINTER == NULL || GETENT_POINTER->GETENT_NAME == NULL)
+		bool hide;
+		
+		while(TRUE)
 		{
-			/* we're out of pw/gr entries */
-			/* ensure there is "[NOTFOUND=return]" in nsswitch.conf to avoid duplicate entries */
-			return NSS_STATUS_NOTFOUND;
+			if(GETENT_POINTER == NULL || GETENT_POINTER->GETENT_NAME == NULL)
+			{
+				/* we're out of pw/gr entries */
+				/* ensure there is "[NOTFOUND=return]" in nsswitch.conf to avoid duplicate entries */
+				return NSS_STATUS_NOTFOUND;
+			}
+			
+			if(buflen < SIZEOF_ENTRY(GETENT_POINTER))
+			{
+				/* given buffer is too small */
+				*errnop = ERANGE;
+				return NSS_STATUS_TRYAGAIN;
+			}
+			
+			COPY_TO_RESULT(buffer, result, GETENT_POINTER);
+			
+			DO_IDMAP(result, &hide);
+			
+			/* move pointer forward */
+			GETENT_POINTER = &GETENT_POINTER[1];
+			
+			if(hide) continue;
+			
+			return NSS_STATUS_SUCCESS;
 		}
-		
-		if(buflen < SIZEOF_ENTRY(GETENT_POINTER))
-		{
-			/* given buffer is too small */
-			*errnop = ERANGE;
-			return NSS_STATUS_TRYAGAIN;
-		}
-		
-		COPY_TO_RESULT(buffer, result, GETENT_POINTER);
-		
-		DO_IDMAP(result);
-		
-		// TODO: hide users with UID/GID we translate other UIDs/GIDs into?
-		
-		/* move pointer forward */
-		GETENT_POINTER = &GETENT_POINTER[1];
-		
-		return NSS_STATUS_SUCCESS;
 	}
 }
