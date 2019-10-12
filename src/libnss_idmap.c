@@ -281,7 +281,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 			   (p_map->id_from_start == *id && p_map->id_from_end == 0))
 			{
 				#ifdef DEBUG
-				printf(stderr, "libnss_idmap: forward map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
+				fprintf(stderr, "libnss_idmap: forward map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
 				if(p_map->statpath != NULL)
@@ -345,7 +345,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 					if(hide != NULL) *hide = TRUE;
 					
 					#ifdef DEBUG
-					printf(stderr, "to -\n");
+					fprintf(stderr, "to -\n");
 					#endif
 				}
 				else
@@ -356,7 +356,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 						*id = p_map->id_to + (*id - p_map->id_from_start);
 					
 					#ifdef DEBUG
-					printf(stderr, "to %d\n", *id);
+					fprintf(stderr, "to %d\n", *id);
 					#endif
 				}
 				break;
@@ -379,7 +379,7 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 			   (p_map->intv == MAPINTV_N_TO_N && p_map->id_to <= *id && (p_map->id_to + (p_map->id_from_end - p_map->id_from_start)) >= *id))
 			{
 				#ifdef DEBUG
-				printf(stderr, "libnss_idmap: reverse map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
+				fprintf(stderr, "libnss_idmap: reverse map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
 				if(p_map->intv == MAPINTV_N_TO_1)
@@ -389,7 +389,7 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 					*id = p_map->id_from_start + (*id - p_map->id_to);
 				
 				#ifdef DEBUG
-				printf(stderr, "to %d\n", *id);
+				fprintf(stderr, "to %d\n", *id);
 				#endif
 				
 				break;
