@@ -11,6 +11,7 @@
 #include <grp.h>
 #include <dlfcn.h>
 #include <err.h>
+#include <linux/limits.h>
 
 
 #define FALSE 0
@@ -20,6 +21,8 @@
 #define LIBC_NAME "libc.so.6"
 
 #define ZERO(x) do{memset(&(x), 0, sizeof(x));}while(0)
+#define STRINGIFY(x) #x
+#define STR(x) STRINGIFY(x)
 
 #define HANDLE_ERRORS_R if(result == NULL){\
 		if(error == 0) return NSS_STATUS_NOTFOUND;\
@@ -44,6 +47,60 @@ void * abmalloc(size_t size)
 	return p;
 }
 
+void abstrrepl(char ** str, const char * find, const char * repl)
+{
+	/* Replace all occurances of 'find' to 'repl' in string pointed by 'str'.
+	   Replacement is not recursive.
+	   '*str' must be allocated by malloc (realloc, calloc, strdup, etc...)
+	   On memory allocation error, calls abort(3) */
+	char *p;
+	char *x;
+	
+	p = *str;
+	
+	while((p = strstr(p, find)) != NULL)
+	{
+		/* Allocate enough space to hold the new string */
+		x = abmalloc(strlen(*str) - strlen(find) + strlen(repl) + 1);
+		
+		sprintf(x, "%.*s%s%s", p - *str, *str, repl, p + strlen(find));
+		
+		/* Let 'p' point to the next char after the replaced substring */
+		p = (char*)((int)p + strlen(repl) + (int)x - (int)*str);
+		free(*str);
+		*str = x;
+	}
+}
+
+unsigned int n_digits(unsigned int i)
+{
+	/* most UIDs are 0-5 digits, so check them first */
+	if(i < 100000)
+	{
+		if(i >= 10000) return 5;
+		if(i >= 1000) return 4;
+		if(i >= 100) return 3;
+		if(i >= 10) return 2;
+		return 1;
+	}
+	/* then come the extreme cases */
+	if(i >= 10000000000000000000U) abort(); /* does not support numbers more than 19 digits */
+	if(i >= 1000000000000000000) return 19;
+	if(i >= 100000000000000000) return 18;
+	if(i >= 10000000000000000) return 17;
+	if(i >= 1000000000000000) return 16;
+	if(i >= 100000000000000) return 15;
+	if(i >= 10000000000000) return 14;
+	if(i >= 1000000000000) return 13;
+	if(i >= 100000000000) return 12;
+	if(i >= 10000000000) return 11;
+	if(i >= 1000000000) return 10;
+	if(i >= 100000000) return 9;
+	if(i >= 10000000) return 8;
+	if(i >= 1000000) return 7;
+	return 6;
+}
+
 
 /* we store gid_t in uid_t, hopefully they are not so different */
 typedef uid_t id_t;
@@ -60,6 +117,12 @@ enum mapping_interval {
 	MAPINTV_N_TO_N,
 };
 
+enum stat_error_behave {
+	STATERR_HIDE,
+	STATERR_RETAIN,
+	STATERR_IGNORE,
+};
+
 struct idmapping {
 	enum nssdb_type nssdb_type;
 	id_t id_from_start;
@@ -67,12 +130,14 @@ struct idmapping {
 	id_t id_to;
 	enum mapping_interval intv;
 	bool hide;
+	char *statpath;
+	enum stat_error_behave on_stat_error;
 	struct idmapping *next;
 };
 
 // TODO: thread-safety
 
-static int passthrough_mode;
+static bool passthrough_mode;
 static FILE *mappings_fh;
 static time_t mappings_mtime;
 static struct idmapping *idmappings;
@@ -93,6 +158,7 @@ void read_idmap()
 	char interval_type_flag[2];
 	char hide_flag[2];
 	char cbuf[2];
+	char pbuf[PATH_MAX+1];
 	ssize_t pos;
 	
 	
@@ -106,23 +172,24 @@ void read_idmap()
 		/* open/rewind file */
 		
 		if(mappings_fh == NULL)
-		{
 			mappings_fh = fopen("/etc/nss.d/idmap", "r");
-		}
 		else
-		{
 			fseek(mappings_fh, 0, 0);
-		}
 		
 		if(mappings_fh != NULL)
 		{
-			if(fstat(fileno(mappings_fh), &st) == -1) st.st_mtime = 0;
+			if(fstat(fileno(mappings_fh), &st) == -1)
+			{
+				st.st_mtime = 0;
+				st.st_size = 0;
+			}
 			mappings_mtime = st.st_mtime;
 			
 			/* clear current mappings */
 			for(p_map1 = idmappings; p_map1 != NULL; p_map1 = p_map2)
 			{
 				p_map2 = p_map1->next;
+				free(p_map1->statpath);
 				free(p_map1);
 			}
 			idmappings = NULL;
@@ -135,35 +202,50 @@ void read_idmap()
 				ZERO(interval_type_flag);
 				ZERO(hide_flag);
 				ZERO(cbuf);
+				ZERO(pbuf);
 				
-				// TODO: filesystem-based uid/gid mapping, eg.
-				//   "uid by home"
-				//   "uid by file /home/%s"
-				//   "uid by file /etc/nss.d/idmap.d/passwd/%u"
-				//   "gid by file /etc/nss.d/idmap.d/group/%u"
-				// TODO: map by name
+				// TODO: map by user/group name
 				
 				pos = ftell(mappings_fh);
+				if(st.st_size != 0 && pos >= st.st_size) break;
+				#define REWIND (fseek(mappings_fh, pos, 0)==0)
 				
-				if((fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[#]%*[^\n]%1[\n]", cbuf, cbuf) == 2) ||
-				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[#]%1[\n]", cbuf, cbuf) == 2) ||
-				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[\n]", cbuf) == 1))
+				if((REWIND && fscanf(mappings_fh, "%1[#]%*[^\n]%1[\n]", cbuf, cbuf) == 2) ||
+				   (REWIND && fscanf(mappings_fh, "%1[#]%1[\n]", cbuf, cbuf) == 2) ||
+				   (REWIND && fscanf(mappings_fh, "%1[\n]", cbuf) == 1))
 					continue;
 				
-				if((fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u-%u %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5) ||
-				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u-%u %1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, hide_flag) == 4) ||
-				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u-%u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4) ||
-				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u %1[-] \n", nssdb_type_flag, &map.id_from_start, hide_flag) == 3) ||
-				   (fseek(mappings_fh, pos, 0)==0 && fscanf(mappings_fh, "%1[ug]id %u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_to) == 3))
+				if((REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, hide_flag) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u %1[-] \n", nssdb_type_flag, &map.id_from_start, hide_flag) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_to) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4))
 				{
 					/* append this mapping */
 					map.nssdb_type = nssdb_type_flag[0] == 'u' ? NSSDB_PASSWD : NSSDB_GROUP;
 					map.intv = interval_type_flag[0] == '-' ? MAPINTV_N_TO_N : MAPINTV_N_TO_1;
-					map.hide = hide_flag[0] == '-' ? TRUE : FALSE;
+					map.hide = hide_flag[0] == '\0' ? FALSE : TRUE;
 					
 					p_map2 = abmalloc(sizeof(struct idmapping));
 					if(idmappings == NULL) idmappings = p_map2;
 					else p_map1->next = p_map2;
+					
+					if(pbuf[0] != '\0')
+					{
+						map.statpath = abstrdup(pbuf);
+						switch(cbuf[0])
+						{
+							case 'h': map.on_stat_error = STATERR_HIDE; break;
+							case 'r': map.on_stat_error = STATERR_RETAIN; break;
+							case 'i': map.on_stat_error = STATERR_IGNORE; break;
+						}
+					}
 					memcpy(p_map2, &map, sizeof(struct idmapping));
 					p_map1 = p_map2;
 				}
@@ -178,9 +260,15 @@ void read_idmap()
 	}
 }
 
-void do_idmap(enum nssdb_type nssdb_type, id_t *id, bool *hide)
+void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide)
 {
 	struct idmapping *p_map;
+	struct stat st;
+	char *path;
+	char *id_str;
+	bool pt_mode;
+	struct passwd *lazy_pwd;
+	struct group *lazy_grp;
 	
 	read_idmap();
 	if(hide != NULL) *hide = FALSE;
@@ -196,7 +284,63 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, bool *hide)
 				printf(stderr, "libnss_idmap: forward map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
-				if(p_map->hide)
+				if(p_map->statpath != NULL)
+				{
+					path = abstrdup(p_map->statpath);
+					id_str = abmalloc(n_digits(*id) + 1);
+					sprintf(id_str, "%u", *id);
+					abstrrepl(&path, "{ID}", id_str);
+					free(id_str);
+					if(strstr(path, "{NAME}") != NULL && name == NULL)
+					{
+						/* 'name' was not known by caller, let's find it now */
+						pt_mode = passthrough_mode;
+						passthrough_mode = TRUE;
+						if(nssdb_type == NSSDB_PASSWD)
+						{
+							lazy_pwd = getpwuid(*id);
+							if(lazy_pwd != NULL)
+								name = lazy_pwd->pw_name;
+						}
+						else
+						{
+							lazy_grp = getgrgid(*id);
+							if(lazy_grp != NULL)
+								name = lazy_grp->gr_name;
+						}
+						passthrough_mode = pt_mode;
+						
+						if(name == NULL)
+						{
+							/* Entry (actually a group, because name is always given 
+							   for NSSDB_PASSWD calls) was not found, but entry name
+							   is needed to construct file name. So treat it like
+							   stat(2) errors. */
+							goto stat_path_error;
+						}
+					}
+					abstrrepl(&path, "{NAME}", name);
+					
+					if(stat(path, &st) == 0)
+					{
+						*id = nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid;
+					}
+					else
+					{
+						stat_path_error:
+						if(p_map->on_stat_error == STATERR_HIDE)
+						{
+							if(hide != NULL) *hide = TRUE;
+						}
+						else if(p_map->on_stat_error == STATERR_IGNORE)
+						{
+							free(path);
+							continue;
+						}
+					}
+					free(path);
+				}
+				else if(p_map->hide)
 				{
 					if(hide != NULL) *hide = TRUE;
 					
@@ -256,13 +400,13 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 
 void do_idmap_pwd(struct passwd *pwd, bool *hide)
 {
-	do_idmap(NSSDB_PASSWD, (id_t*)&(pwd->pw_uid), hide);
-	do_idmap(NSSDB_GROUP, (id_t*)&(pwd->pw_gid), NULL);
+	do_idmap(NSSDB_PASSWD, (id_t*)&(pwd->pw_uid), pwd->pw_name, hide);
+	do_idmap(NSSDB_GROUP, (id_t*)&(pwd->pw_gid), NULL, NULL);
 }
 
 void do_idmap_grp(struct group *grp, bool *hide)
 {
-	do_idmap(NSSDB_GROUP, (id_t*)&(grp->gr_gid), hide);
+	do_idmap(NSSDB_GROUP, (id_t*)&(grp->gr_gid), grp->gr_name, hide);
 }
 
 
@@ -313,7 +457,7 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		{
 			/* there is no UID mapped to the requested UID,
 			   check if the requested UID maps to something else */
-			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_uid, &hide);
+			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_uid, NULL, &hide); // TODO: pw_name
 			if(lookup_uid != uid || hide)
 			{
 				/* don't show this entry, because it has an UID 
@@ -380,7 +524,7 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 		
 		if(lookup_gid == gid)
 		{
-			do_idmap(NSSDB_GROUP, (id_t*)&lookup_gid, &hide);
+			do_idmap(NSSDB_GROUP, (id_t*)&lookup_gid, NULL, &hide); // TODO: gr_name
 			if(lookup_gid != gid || hide)
 			{
 				return NSS_STATUS_NOTFOUND;
