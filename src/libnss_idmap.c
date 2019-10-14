@@ -12,6 +12,7 @@
 #include <dlfcn.h>
 #include <err.h>
 #include <linux/limits.h>
+#include <glob.h>
 
 
 #define FALSE 0
@@ -210,6 +211,7 @@ void read_idmap()
 				if(st.st_size != 0 && pos >= st.st_size) break;
 				#define REWIND (fseek(mappings_fh, pos, 0)==0)
 				
+				/* skip comment and empty lines */
 				if((REWIND && fscanf(mappings_fh, "%1[#]%*[^\n]%1[\n]", cbuf, cbuf) == 2) ||
 				   (REWIND && fscanf(mappings_fh, "%1[#]%1[\n]", cbuf, cbuf) == 2) ||
 				   (REWIND && fscanf(mappings_fh, "%1[\n]", cbuf) == 1))
@@ -260,13 +262,152 @@ void read_idmap()
 	}
 }
 
+void * in_new_address_space(void ** addrspace_hndl, const char * func_name)
+{
+	/* Erect a new address space.
+	   Return the given function from that address space.
+	   Abort on memory error.
+	   Caller must dlclose(). */
+	char *dlerr;
+	
+	*addrspace_hndl = dlmopen(LM_ID_NEWLM, LIBC_NAME, RTLD_LAZY | RTLD_DEEPBIND);
+	dlerr = dlerror();
+	if(dlerr)
+	{
+		warnx("libnss_idmap: %s", dlerr);
+		abort();
+	}
+	return dlsym(*addrspace_hndl, func_name);
+}
+
+void copy_pwent(struct passwd *dst, struct passwd *src)
+{
+	/* copy over pwd to our static array */
+	dst->pw_name = abstrdup(src->pw_name);
+	dst->pw_passwd = abstrdup(src->pw_passwd);
+	dst->pw_uid = src->pw_uid;
+	dst->pw_gid = src->pw_gid;
+	dst->pw_gecos = abstrdup(src->pw_gecos);
+	dst->pw_dir = abstrdup(src->pw_dir);
+	dst->pw_shell = abstrdup(src->pw_shell);
+}
+
+void copy_grent(struct group *dst, struct group *src)
+{
+	/* copy over grp to our static array */
+	unsigned int idx_mem;
+	
+	dst->gr_name = abstrdup(src->gr_name);
+	dst->gr_passwd = abstrdup(src->gr_passwd);
+	dst->gr_gid = src->gr_gid;
+	
+	dst->gr_mem = abmalloc(sizeof(void*));
+	for(idx_mem = 0; src->gr_mem != NULL && src->gr_mem[idx_mem] != NULL; idx_mem++)
+	{
+		dst->gr_mem = realloc(dst->gr_mem, (idx_mem+2) * sizeof(void*));
+		if(dst->gr_mem == NULL) abort();
+		dst->gr_mem[idx_mem] = abstrdup(src->gr_mem[idx_mem]);
+	}
+	dst->gr_mem[idx_mem] = NULL;
+}
+
+void free_pwentry_fields(struct passwd *pwd)
+{
+	free(pwd->pw_name);
+	free(pwd->pw_passwd);
+	free(pwd->pw_gecos);
+	free(pwd->pw_dir);
+	free(pwd->pw_shell);
+}
+
+void free_grentry_fields(struct group *grp)
+{
+	unsigned int idx_mem;
+	for(idx_mem = 0; grp->gr_mem != NULL && grp->gr_mem[idx_mem] != NULL; idx_mem++)
+		free(grp->gr_mem[idx_mem]);
+	free(grp->gr_mem);
+	free(grp->gr_passwd);
+	free(grp->gr_name);
+}
+
+void free_pwentries()
+{
+	unsigned int idx_entry;
+	for(idx_entry = 0; pwentries != NULL && pwentries[idx_entry].pw_name != NULL; idx_entry++)
+		free_pwentry_fields(&pwentries[idx_entry]);
+	free(pwentries);
+	pwentries = NULL;
+}
+
+void free_grentries()
+{
+	unsigned int idx_entry;
+	for(idx_entry = 0; grentries != NULL && grentries[idx_entry].gr_name != NULL; idx_entry++)
+		free_grentry_fields(&grentries[idx_entry]);
+	free(grentries);
+	grentries = NULL;
+}
+
+struct passwd * nolock_getpwuid(uid_t uid)
+{
+	/* Calls getpwuid() in a new address space to circumvent libc lock.
+	   Caller must free memory pointed by resulting pointer recursively.
+	   See free_pwentry_fields() */
+	void *libc;
+	struct passwd *tmp_pwd;
+	struct passwd *result_pwd;
+	bool pt_mode;
+	
+	struct passwd * (* _getpwuid)(uid_t) = in_new_address_space(&libc, "getpwuid");
+	
+	pt_mode = passthrough_mode;
+	passthrough_mode = TRUE;
+	tmp_pwd = _getpwuid(uid);
+	passthrough_mode = pt_mode;
+	if(tmp_pwd == NULL)
+		result_pwd = NULL;
+	else
+	{
+		/* Copy out passwd entry from temporary static address space 
+		   to our main address space. */
+		result_pwd = abmalloc(sizeof(struct passwd));
+		copy_pwent(result_pwd, tmp_pwd);
+	}
+	
+	dlclose(libc);
+	return result_pwd;
+}
+
+struct group * nolock_getgrgid(gid_t gid)
+{
+	/* Similar to nolock_getpwuid(). See there. */
+	void *libc;
+	struct group *tmp_grp;
+	struct group *result_grp;
+	bool pt_mode;
+	
+	struct group * (* _getgrgid)(gid_t) = in_new_address_space(&libc, "getgrgid");
+	
+	pt_mode = passthrough_mode;
+	passthrough_mode = TRUE;
+	tmp_grp = _getgrgid(gid);
+	passthrough_mode = pt_mode;
+	if(tmp_grp == NULL)
+		result_grp = NULL;
+	else
+	{
+		result_grp = abmalloc(sizeof(struct group));
+		copy_grent(result_grp, tmp_grp);
+	}
+	
+	dlclose(libc);
+	return result_grp;
+}
+
 void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide)
 {
 	struct idmapping *p_map;
 	struct stat st;
-	char *path;
-	char *id_str;
-	bool pt_mode;
 	struct passwd *lazy_pwd;
 	struct group *lazy_grp;
 	
@@ -280,50 +421,66 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 			if((p_map->id_from_start <= *id && p_map->id_from_end >= *id) ||
 			   (p_map->id_from_start == *id && p_map->id_from_end == 0))
 			{
+				char *path;
+				
 				#ifdef DEBUG
 				fprintf(stderr, "libnss_idmap: forward map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
 				if(p_map->statpath != NULL)
 				{
+					char *id_str;
+					char *_name;
+					
 					path = abstrdup(p_map->statpath);
 					id_str = abmalloc(n_digits(*id) + 1);
 					sprintf(id_str, "%u", *id);
 					abstrrepl(&path, "{ID}", id_str);
 					free(id_str);
-					if(strstr(path, "{NAME}") != NULL && name == NULL)
+					_name = (char *)name;
+					
+					if(strstr(path, "{NAME}") != NULL && _name == NULL)
 					{
 						/* 'name' was not known by caller, let's find it now */
-						pt_mode = passthrough_mode;
-						passthrough_mode = TRUE;
 						if(nssdb_type == NSSDB_PASSWD)
 						{
-							lazy_pwd = getpwuid(*id);
+							lazy_pwd = nolock_getpwuid(*id);
 							if(lazy_pwd != NULL)
-								name = lazy_pwd->pw_name;
+							{
+								_name = abstrdup(lazy_pwd->pw_name);
+								free_pwentry_fields(lazy_pwd);
+								free(lazy_pwd);
+							}
 						}
 						else
 						{
-							lazy_grp = getgrgid(*id);
+							lazy_grp = nolock_getgrgid(*id);
 							if(lazy_grp != NULL)
-								name = lazy_grp->gr_name;
+							{
+								_name = abstrdup(lazy_grp->gr_name);
+								free_grentry_fields(lazy_grp);
+								free(lazy_grp);
+							}
 						}
-						passthrough_mode = pt_mode;
 						
-						if(name == NULL)
+						if(_name == NULL)
 						{
-							/* Entry (actually a group, because name is always given 
-							   for NSSDB_PASSWD calls) was not found, but entry name
-							   is needed to construct file name. So treat it like
-							   stat(2) errors. */
+							/* Entry was not found, but entry name is needed 
+							   to construct file name. So treat it like stat(2) 
+							   errors. */
 							goto stat_path_error;
 						}
 					}
-					abstrrepl(&path, "{NAME}", name);
+					abstrrepl(&path, "{NAME}", _name);
+					free(_name);
 					
 					if(stat(path, &st) == 0)
 					{
 						*id = nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid;
+						
+						#ifdef DEBUG
+						fprintf(stderr, "to %d\n", *id);
+						#endif
 					}
 					else
 					{
@@ -331,9 +488,17 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 						if(p_map->on_stat_error == STATERR_HIDE)
 						{
 							if(hide != NULL) *hide = TRUE;
+							
+							#ifdef DEBUG
+							fprintf(stderr, "to -\n");
+							#endif
 						}
 						else if(p_map->on_stat_error == STATERR_IGNORE)
 						{
+							#ifdef DEBUG
+							fprintf(stderr, "...\n");
+							#endif
+							
 							free(path);
 							continue;
 						}
@@ -365,6 +530,19 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 	}
 }
 
+id_t get_id_to_be_replaced(const struct idmapping *p_map, const id_t new_id)
+{
+	/* Returns the ID which has to be replaced to 'new_id'
+	   according to rule pointed by 'p_map'.
+	   Used in reverse mapping. */
+	
+	if(p_map->intv == MAPINTV_N_TO_1)
+		/* NOTE: ambiguous reverse mapping */
+		return p_map->id_from_start;
+	else
+		return p_map->id_from_start + (new_id - p_map->id_to);
+}
+
 void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 {
 	struct idmapping *p_map;
@@ -375,18 +553,86 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 	{
 		if(p_map->nssdb_type == nssdb_type)
 		{
-			if((p_map->intv == MAPINTV_N_TO_1 && p_map->id_to == *id) ||
+			if(p_map->statpath != NULL)
+			{
+				/* Scan all possible files to find out which ID maps to '*id'. */
+				/* NOTE: this is expensive */
+				char *path;
+				glob_t matches;
+				int idx;
+				bool id_found;
+				
+				#ifdef DEBUG
+				fprintf(stderr, "libnss_idmap: reverse map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
+				#endif
+				
+				path = abstrdup(p_map->statpath);
+				abstrrepl(&path, "{ID}", "?*");
+				abstrrepl(&path, "{NAME}", "?*");
+				glob(path, GLOB_NOSORT, NULL, &matches);
+				for(idx = 0; matches.gl_pathv != NULL && matches.gl_pathv[idx] != NULL; idx++)
+				{
+					/* Verify that uid/gid of this file equals to '*id' */
+					struct stat st;
+					
+					if(stat(matches.gl_pathv[idx], &st) == 0)
+					{
+						id_t verify_id;
+						
+						verify_id = (id_t)(nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid);
+						if(verify_id == *id)
+						{
+							/* Verify that file uid/gid of this rule really maps to this file's uid/gid,
+							   because it may have been covered earlier or path pattern may not match. */
+							id_t forward_map_id;
+							bool hide;
+							
+							forward_map_id = get_id_to_be_replaced(p_map, *id);
+							verify_id = forward_map_id;
+							do_idmap(nssdb_type, &verify_id, NULL, &hide);
+							
+							if(verify_id == *id && !hide)
+							{
+								/* UID/GID of this rule was the one which maps to the '*id' in the reverse mapping call. */
+								*id = forward_map_id;
+								id_found = TRUE;
+								break;
+							}
+						}
+					}
+					else
+					{
+						// TODO: how to handle these errors?
+					}
+				}
+				globfree(&matches);
+				if(id_found)
+				{
+					#ifdef DEBUG
+					fprintf(stderr, "to %d\n", *id);
+					#endif
+					break;
+				}
+				else
+				{
+					#ifdef DEBUG
+					fprintf(stderr, "...\n");
+					#endif
+					// TODO: how to handle these errors?
+				}
+			}
+			
+			else if((p_map->intv == MAPINTV_N_TO_1 && p_map->id_to == *id) ||
 			   (p_map->intv == MAPINTV_N_TO_N && p_map->id_to <= *id && (p_map->id_to + (p_map->id_from_end - p_map->id_from_start)) >= *id))
 			{
 				#ifdef DEBUG
 				fprintf(stderr, "libnss_idmap: reverse map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
-				if(p_map->intv == MAPINTV_N_TO_1)
-					/* NOTE: ambiguous reverse mapping */
-					*id = p_map->id_from_start;
-				else
-					*id = p_map->id_from_start + (*id - p_map->id_to);
+				// TODO: do forward mapping here to verify whether 'id_from_start' really maps to '*id',
+				//  so no earlier mapping rule covers it.
+				
+				*id = get_id_to_be_replaced(p_map, *id);
 				
 				#ifdef DEBUG
 				fprintf(stderr, "to %d\n", *id);
@@ -543,66 +789,6 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 	}
 }
 
-void copy_pwent(struct passwd *dst, struct passwd *src)
-{
-	/* copy over pwd to our static array */
-	dst->pw_name = abstrdup(src->pw_name);
-	dst->pw_passwd = abstrdup(src->pw_passwd);
-	dst->pw_uid = src->pw_uid;
-	dst->pw_gid = src->pw_gid;
-	dst->pw_gecos = abstrdup(src->pw_gecos);
-	dst->pw_dir = abstrdup(src->pw_dir);
-	dst->pw_shell = abstrdup(src->pw_shell);
-}
-
-void copy_grent(struct group *dst, struct group *src)
-{
-	/* copy over grp to our static array */
-	unsigned int idx_mem;
-	
-	dst->gr_name = abstrdup(src->gr_name);
-	dst->gr_passwd = abstrdup(src->gr_passwd);
-	dst->gr_gid = src->gr_gid;
-	
-	dst->gr_mem = abmalloc(sizeof(void*));
-	for(idx_mem = 0; src->gr_mem != NULL && src->gr_mem[idx_mem] != NULL; idx_mem++)
-	{
-		dst->gr_mem = realloc(dst->gr_mem, (idx_mem+2) * sizeof(void*));
-		if(dst->gr_mem == NULL) abort();
-		dst->gr_mem[idx_mem] = abstrdup(src->gr_mem[idx_mem]);
-	}
-	dst->gr_mem[idx_mem] = NULL;
-}
-
-void free_pwentries()
-{
-	unsigned int idx_entry;
-	for(idx_entry = 0; pwentries != NULL && pwentries[idx_entry].pw_name != NULL; idx_entry++)
-	{
-		free(pwentries[idx_entry].pw_name);
-		free(pwentries[idx_entry].pw_passwd);
-		free(pwentries[idx_entry].pw_gecos);
-		free(pwentries[idx_entry].pw_dir);
-		free(pwentries[idx_entry].pw_shell);
-	}
-	free(pwentries);
-	pwentries = NULL;
-}
-
-void free_grentries()
-{
-	unsigned int idx_entry, idx_mem;
-	for(idx_entry = 0; grentries != NULL && grentries[idx_entry].gr_name != NULL; idx_entry++)
-	{
-		for(idx_mem = 0; grentries[idx_entry].gr_mem != NULL && grentries[idx_entry].gr_mem[idx_mem] != NULL; idx_mem++)
-			free(grentries[idx_entry].gr_mem[idx_mem]);
-		free(grentries[idx_entry].gr_mem);
-		free(grentries[idx_entry].gr_passwd);
-		free(grentries[idx_entry].gr_name);
-	}
-	free(grentries);
-	grentries = NULL;
-}
 
 size_t sizeof_passwd(struct passwd *pwent)
 {
