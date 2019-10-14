@@ -430,16 +430,16 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 				if(p_map->statpath != NULL)
 				{
 					char *id_str;
-					char *_name;
+					char **p_name;
 					
 					path = abstrdup(p_map->statpath);
 					id_str = abmalloc(n_digits(*id) + 1);
 					sprintf(id_str, "%u", *id);
 					abstrrepl(&path, "{ID}", id_str);
 					free(id_str);
-					_name = (char *)name;
+					p_name = (char **)&name;
 					
-					if(strstr(path, "{NAME}") != NULL && _name == NULL)
+					if(strstr(path, "{NAME}") != NULL && *p_name == NULL)
 					{
 						/* 'name' was not known by caller, let's find it now */
 						if(nssdb_type == NSSDB_PASSWD)
@@ -447,7 +447,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 							lazy_pwd = nolock_getpwuid(*id);
 							if(lazy_pwd != NULL)
 							{
-								_name = abstrdup(lazy_pwd->pw_name);
+								*p_name = abstrdup(lazy_pwd->pw_name);
 								free_pwentry_fields(lazy_pwd);
 								free(lazy_pwd);
 							}
@@ -457,13 +457,13 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 							lazy_grp = nolock_getgrgid(*id);
 							if(lazy_grp != NULL)
 							{
-								_name = abstrdup(lazy_grp->gr_name);
+								*p_name = abstrdup(lazy_grp->gr_name);
 								free_grentry_fields(lazy_grp);
 								free(lazy_grp);
 							}
 						}
 						
-						if(_name == NULL)
+						if(*p_name == NULL)
 						{
 							/* Entry was not found, but entry name is needed 
 							   to construct file name. So treat it like stat(2) 
@@ -471,15 +471,15 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 							goto stat_path_error;
 						}
 					}
-					abstrrepl(&path, "{NAME}", _name);
-					free(_name);
+					abstrrepl(&path, "{NAME}", *p_name);
+					if(*p_name != name) free(*p_name);
 					
 					if(stat(path, &st) == 0)
 					{
 						*id = nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid;
 						
 						#ifdef DEBUG
-						fprintf(stderr, "to %d\n", *id);
+						fprintf(stderr, "to %d as %s\n", *id, path);
 						#endif
 					}
 					else
@@ -490,13 +490,13 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 							if(hide != NULL) *hide = TRUE;
 							
 							#ifdef DEBUG
-							fprintf(stderr, "to -\n");
+							fprintf(stderr, "to - as %s failed\n", path);
 							#endif
 						}
 						else if(p_map->on_stat_error == STATERR_IGNORE)
 						{
 							#ifdef DEBUG
-							fprintf(stderr, "...\n");
+							fprintf(stderr, "... (%s failed)\n", path);
 							#endif
 							
 							free(path);
@@ -563,17 +563,23 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 				bool id_found;
 				
 				#ifdef DEBUG
-				fprintf(stderr, "libnss_idmap: reverse map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
+				fprintf(stderr, "libnss_idmap: reverse map %cid %d back ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
+				id_found = FALSE;
 				path = abstrdup(p_map->statpath);
 				abstrrepl(&path, "{ID}", "?*");
 				abstrrepl(&path, "{NAME}", "?*");
 				glob(path, GLOB_NOSORT, NULL, &matches);
+				
 				for(idx = 0; matches.gl_pathv != NULL && matches.gl_pathv[idx] != NULL; idx++)
 				{
 					/* Verify that uid/gid of this file equals to '*id' */
 					struct stat st;
+					
+					#ifdef DEBUG
+					fprintf(stderr, "[%s] ", matches.gl_pathv[idx]);
+					#endif
 					
 					if(stat(matches.gl_pathv[idx], &st) == 0)
 					{
@@ -703,7 +709,7 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		{
 			/* there is no UID mapped to the requested UID,
 			   check if the requested UID maps to something else */
-			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_uid, NULL, &hide); // TODO: pw_name
+			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_uid, NULL, &hide);
 			if(lookup_uid != uid || hide)
 			{
 				/* don't show this entry, because it has an UID 
@@ -770,7 +776,7 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 		
 		if(lookup_gid == gid)
 		{
-			do_idmap(NSSDB_GROUP, (id_t*)&lookup_gid, NULL, &hide); // TODO: gr_name
+			do_idmap(NSSDB_GROUP, (id_t*)&lookup_gid, NULL, &hide);
 			if(lookup_gid != gid || hide)
 			{
 				return NSS_STATUS_NOTFOUND;
