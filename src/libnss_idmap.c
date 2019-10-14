@@ -683,6 +683,9 @@ _nss_idmap_getpwnam_r(const char *name, struct passwd *result, char *buffer, siz
 		do_idmap_pwd(result, &hide);
 		if(hide) return NSS_STATUS_NOTFOUND;
 		
+		// TODO: check if the resulted UID would be mapped to something,
+		//   to prevent multiple users with the same UID
+		
 		return NSS_STATUS_SUCCESS;
 	}
 }
@@ -751,6 +754,9 @@ _nss_idmap_getgrnam_r(const char *name, struct group *result, char *buffer, size
 		
 		do_idmap_grp(result, &hide);
 		if(hide) return NSS_STATUS_NOTFOUND;
+		
+		// TODO: check if the resulted GID would be mapped to something,
+		//   to prevent multiple groups with the same GID
 		
 		return NSS_STATUS_SUCCESS;
 	}
