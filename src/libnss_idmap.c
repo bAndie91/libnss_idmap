@@ -217,14 +217,14 @@ void read_idmap()
 				   (REWIND && fscanf(mappings_fh, "%1[\n]", cbuf) == 1))
 					continue;
 				
-				if((REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5) ||
-				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, hide_flag) == 4) ||
-				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4) ||
+				if((REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u to %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %1[h]ide \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, hide_flag) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u to %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
-				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u %1[-] \n", nssdb_type_flag, &map.id_from_start, hide_flag) == 3) ||
-				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u %u \n", nssdb_type_flag, &map.id_from_start, &map.id_to) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u to %u \n", nssdb_type_flag, &map.id_from_start, &map.id_to) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u %1[h]ide \n", nssdb_type_flag, &map.id_from_start, hide_flag) == 3) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4))
@@ -232,7 +232,7 @@ void read_idmap()
 					/* append this mapping */
 					map.nssdb_type = nssdb_type_flag[0] == 'u' ? NSSDB_PASSWD : NSSDB_GROUP;
 					map.intv = interval_type_flag[0] == '-' ? MAPINTV_N_TO_N : MAPINTV_N_TO_1;
-					map.hide = hide_flag[0] == '\0' ? FALSE : TRUE;
+					map.hide = hide_flag[0] != '\0' ? TRUE : FALSE;
 					
 					p_map2 = abmalloc(sizeof(struct idmapping));
 					if(idmappings == NULL) idmappings = p_map2;
