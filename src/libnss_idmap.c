@@ -21,6 +21,9 @@
 /* where to load secondary setXXent/getXXent/endXXent symbols from */
 #define LIBC_NAME "libc.so.6"
 
+/* user/group name limit in config file */
+#define NAME_MAX 64
+
 #define ZERO(x) do{memset(&(x), 0, sizeof(x));}while(0)
 #define STRINGIFY(x) #x
 #define STR(x) STRINGIFY(x)
@@ -128,6 +131,7 @@ struct idmapping {
 	enum nssdb_type nssdb_type;
 	id_t id_from_start;
 	id_t id_from_end;
+	char *name_from;
 	id_t id_to;
 	enum mapping_interval intv;
 	bool hide;
@@ -160,6 +164,7 @@ void read_idmap()
 	char hide_flag[2];
 	char cbuf[2];
 	char pbuf[PATH_MAX+1];
+	char name[NAME_MAX+1];
 	ssize_t pos;
 	
 	
@@ -191,6 +196,7 @@ void read_idmap()
 			{
 				p_map2 = p_map1->next;
 				free(p_map1->statpath);
+				free(p_map1->name_from);
 				free(p_map1);
 			}
 			idmappings = NULL;
@@ -204,8 +210,7 @@ void read_idmap()
 				ZERO(hide_flag);
 				ZERO(cbuf);
 				ZERO(pbuf);
-				
-				// TODO: map by user/group name
+				ZERO(name);
 				
 				pos = ftell(mappings_fh);
 				if(st.st_size != 0 && pos >= st.st_size) break;
@@ -218,8 +223,8 @@ void read_idmap()
 					continue;
 				
 				if((REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u to %u%1[-] \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to, interval_type_flag) == 5) ||
-				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %1[h]ide \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, hide_flag) == 4) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u to %u \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, &map.id_to) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u %1[h]ide \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, hide_flag) == 4) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u-%u as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, &map.id_from_start, &map.id_from_end, pbuf, cbuf) == 5) ||
@@ -227,7 +232,18 @@ void read_idmap()
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u %1[h]ide \n", nssdb_type_flag, &map.id_from_start, hide_flag) == 3) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
-				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4))
+				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
+				   
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s to %u \n", nssdb_type_flag, name, &map.id_to) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s to %u \n", nssdb_type_flag, name, &map.id_to) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s %1[h]ide \n", nssdb_type_flag, name, hide_flag) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s %1[h]ide \n", nssdb_type_flag, name, hide_flag) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
 				{
 					/* append this mapping */
 					map.nssdb_type = nssdb_type_flag[0] == 'u' ? NSSDB_PASSWD : NSSDB_GROUP;
@@ -248,6 +264,11 @@ void read_idmap()
 							case 'i': map.on_stat_error = STATERR_IGNORE; break;
 						}
 					}
+					if(name[0] != '\0')
+					{
+						map.name_from = abstrdup(name);
+					}
+					
 					memcpy(p_map2, &map, sizeof(struct idmapping));
 					p_map1 = p_map2;
 				}
@@ -410,9 +431,11 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 	struct stat st;
 	struct passwd *lazy_pwd;
 	struct group *lazy_grp;
+	char **p_name;
 	
 	read_idmap();
 	if(hide != NULL) *hide = FALSE;
+	p_name = (char **)&name;
 	
 	for(p_map = idmappings; p_map != NULL; p_map = p_map->next)
 	{
@@ -430,14 +453,12 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 				if(p_map->statpath != NULL)
 				{
 					char *id_str;
-					char **p_name;
 					
 					path = abstrdup(p_map->statpath);
 					id_str = abmalloc(n_digits(*id) + 1);
 					sprintf(id_str, "%u", *id);
 					abstrrepl(&path, "{ID}", id_str);
 					free(id_str);
-					p_name = (char **)&name;
 					
 					if(strstr(path, "{NAME}") != NULL && *p_name == NULL)
 					{
@@ -472,7 +493,6 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 						}
 					}
 					abstrrepl(&path, "{NAME}", *p_name);
-					if(*p_name != name) free(*p_name);
 					
 					if(stat(path, &st) == 0)
 					{
@@ -528,6 +548,8 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 			}
 		}
 	}
+	
+	if(*p_name != name) free(*p_name);
 }
 
 id_t get_id_to_be_replaced(const struct idmapping *p_map, const id_t new_id)
