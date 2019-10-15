@@ -22,7 +22,7 @@
 #define LIBC_NAME "libc.so.6"
 
 /* user/group name limit in config file */
-#define NAME_MAX 64
+#define ENTRYNAME_MAX 64
 
 #define ZERO(x) do{memset(&(x), 0, sizeof(x));}while(0)
 #define STRINGIFY(x) #x
@@ -164,7 +164,7 @@ void read_idmap()
 	char hide_flag[2];
 	char cbuf[2];
 	char pbuf[PATH_MAX+1];
-	char name[NAME_MAX+1];
+	char name[ENTRYNAME_MAX+1];
 	ssize_t pos;
 	
 	
@@ -234,16 +234,16 @@ void read_idmap()
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
 				   (REWIND && fscanf(mappings_fh, "%1[ug]id %u as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, &map.id_from_start, pbuf, cbuf) == 4) ||
 				   
-				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s to %u \n", nssdb_type_flag, name, &map.id_to) == 3) ||
-				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s to %u \n", nssdb_type_flag, name, &map.id_to) == 3) ||
-				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s %1[h]ide \n", nssdb_type_flag, name, hide_flag) == 3) ||
-				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s %1[h]ide \n", nssdb_type_flag, name, hide_flag) == 3) ||
-				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
-				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
-				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
-				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
-				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
-				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(NAME_MAX)"s as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(ENTRYNAME_MAX)"s to %u \n", nssdb_type_flag, name, &map.id_to) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(ENTRYNAME_MAX)"s to %u \n", nssdb_type_flag, name, &map.id_to) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(ENTRYNAME_MAX)"s %1[h]ide \n", nssdb_type_flag, name, hide_flag) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(ENTRYNAME_MAX)"s %1[h]ide \n", nssdb_type_flag, name, hide_flag) == 3) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(ENTRYNAME_MAX)"s as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(ENTRYNAME_MAX)"s as %"STR(PATH_MAX)"s or %1[h]ide \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(ENTRYNAME_MAX)"s as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(ENTRYNAME_MAX)"s as %"STR(PATH_MAX)"s or %1[r]etain \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[u]ser %"STR(ENTRYNAME_MAX)"s as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, name, pbuf, cbuf) == 4) ||
+				   (REWIND && fscanf(mappings_fh, "%1[g]roup %"STR(ENTRYNAME_MAX)"s as %"STR(PATH_MAX)"s or %1[i]gnore \n", nssdb_type_flag, name, pbuf, cbuf) == 4))
 				{
 					/* append this mapping */
 					map.nssdb_type = nssdb_type_flag[0] == 'u' ? NSSDB_PASSWD : NSSDB_GROUP;
@@ -425,12 +425,42 @@ struct group * nolock_getgrgid(gid_t gid)
 	return result_grp;
 }
 
+char * lazy_resolve_name(const enum nssdb_type nssdb_type, const id_t id_from)
+{
+	/* You can free() resulting pointer. */
+	struct passwd *pwd;
+	struct group *grp;
+	char * name;
+	
+	name = NULL;
+	
+	if(nssdb_type == NSSDB_PASSWD)
+	{
+		pwd = nolock_getpwuid(id_from);
+		if(pwd != NULL)
+		{
+			name = abstrdup(pwd->pw_name);
+			free_pwentry_fields(pwd);
+			free(pwd);
+		}
+	}
+	else
+	{
+		grp = nolock_getgrgid(id_from);
+		if(grp != NULL)
+		{
+			name = abstrdup(grp->gr_name);
+			free_grentry_fields(grp);
+			free(grp);
+		}
+	}
+	return name;
+}						
+
 void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide)
 {
 	struct idmapping *p_map;
 	struct stat st;
-	struct passwd *lazy_pwd;
-	struct group *lazy_grp;
 	char **p_name;
 	
 	read_idmap();
@@ -439,10 +469,36 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 	
 	for(p_map = idmappings; p_map != NULL; p_map = p_map->next)
 	{
+		bool rule_matched;
+		
+		rule_matched = FALSE;
+		
 		if(p_map->nssdb_type == nssdb_type)
 		{
-			if((p_map->id_from_start <= *id && p_map->id_from_end >= *id) ||
+			if(p_map->name_from != NULL)
+			{
+				if(*p_name == NULL)
+				{
+					/* we're gona map by user/group name, but the name was not known
+					   by the caller, so resolve it now */
+					*p_name = lazy_resolve_name(nssdb_type, *id);
+				}
+				if(*p_name == NULL)
+				{
+					// TODO: how to handle these errors?
+				}
+				if(strcmp(p_map->name_from, *p_name)==0)
+				{
+					rule_matched = TRUE;
+				}
+			}
+			else if((p_map->id_from_start <= *id && p_map->id_from_end >= *id) ||
 			   (p_map->id_from_start == *id && p_map->id_from_end == 0))
+			{
+				rule_matched = TRUE;
+			}
+			
+			if(rule_matched)
 			{
 				char *path;
 				
@@ -463,32 +519,12 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 					if(strstr(path, "{NAME}") != NULL && *p_name == NULL)
 					{
 						/* 'name' was not known by caller, let's find it now */
-						if(nssdb_type == NSSDB_PASSWD)
-						{
-							lazy_pwd = nolock_getpwuid(*id);
-							if(lazy_pwd != NULL)
-							{
-								*p_name = abstrdup(lazy_pwd->pw_name);
-								free_pwentry_fields(lazy_pwd);
-								free(lazy_pwd);
-							}
-						}
-						else
-						{
-							lazy_grp = nolock_getgrgid(*id);
-							if(lazy_grp != NULL)
-							{
-								*p_name = abstrdup(lazy_grp->gr_name);
-								free_grentry_fields(lazy_grp);
-								free(lazy_grp);
-							}
-						}
-						
+						*p_name = lazy_resolve_name(nssdb_type, *id);
 						if(*p_name == NULL)
 						{
-							/* Entry was not found, but entry name is needed 
-							   to construct file name. So treat it like stat(2) 
-							   errors. */
+							/* The passwd/group entry for the given Id was not found, 
+							   but it is needed to construct the file name. So treat 
+							   it like stat(2) errors. */
 							goto stat_path_error;
 						}
 					}
@@ -575,6 +611,8 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 	{
 		if(p_map->nssdb_type == nssdb_type)
 		{
+			// TODO: reverse mapping lookup by names
+			
 			if(p_map->statpath != NULL)
 			{
 				/* Scan all possible files to find out which ID maps to '*id'. */
