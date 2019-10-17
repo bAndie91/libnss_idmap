@@ -425,6 +425,58 @@ struct group * nolock_getgrgid(gid_t gid)
 	return result_grp;
 }
 
+struct passwd * nolock_getpwnam(const char * name)
+{
+	/* Similar to nolock_getpwnam(). See there. */
+	void *libc;
+	struct passwd *tmp_pwd;
+	struct passwd *result_pwd;
+	bool pt_mode;
+	
+	struct passwd * (* _getpwnam)(char*) = in_new_address_space(&libc, "getpwnam");
+	
+	pt_mode = passthrough_mode;
+	passthrough_mode = TRUE;
+	tmp_pwd = _getpwnam((char*)name);
+	passthrough_mode = pt_mode;
+	if(tmp_pwd == NULL)
+		result_pwd = NULL;
+	else
+	{
+		result_pwd = abmalloc(sizeof(struct passwd));
+		copy_pwent(result_pwd, tmp_pwd);
+	}
+	
+	dlclose(libc);
+	return result_pwd;
+}
+
+struct group * nolock_getgrnam(const char * name)
+{
+	/* Similar to nolock_getgrgid(). See there. */
+	void *libc;
+	struct group *tmp_grp;
+	struct group *result_grp;
+	bool pt_mode;
+	
+	struct group * (* _getgrnam)(char*) = in_new_address_space(&libc, "getgrnam");
+	
+	pt_mode = passthrough_mode;
+	passthrough_mode = TRUE;
+	tmp_grp = _getgrnam((char*)name);
+	passthrough_mode = pt_mode;
+	if(tmp_grp == NULL)
+		result_grp = NULL;
+	else
+	{
+		result_grp = abmalloc(sizeof(struct group));
+		copy_grent(result_grp, tmp_grp);
+	}
+	
+	dlclose(libc);
+	return result_grp;
+}
+
 char * lazy_resolve_name(const enum nssdb_type nssdb_type, const id_t id_from)
 {
 	/* You can free() resulting pointer. */
@@ -456,6 +508,43 @@ char * lazy_resolve_name(const enum nssdb_type nssdb_type, const id_t id_from)
 	}
 	return name;
 }						
+
+id_t lazy_resolve_id(const enum nssdb_type nssdb_type, const char * name_from, bool * found)
+{
+	/* Resolve a user/group name to UID/GID by upstream NSS modules
+	   and return the ID if it was found.
+	   Indicate if it was found in '*found' parameter, check it before
+	   consuming return value. */
+	struct passwd *pwd;
+	struct group *grp;
+	id_t id;
+	
+	*found = FALSE;
+	
+	if(nssdb_type == NSSDB_PASSWD)
+	{
+		pwd = nolock_getpwnam(name_from);
+		if(pwd != NULL)
+		{
+			*found = TRUE;
+			id = (id_t)pwd->pw_uid;
+			free_pwentry_fields(pwd);
+			free(pwd);
+		}
+	}
+	else
+	{
+		grp = nolock_getgrnam(name_from);
+		if(grp != NULL)
+		{
+			*found = TRUE;
+			id = (id_t)grp->gr_gid;
+			free_grentry_fields(grp);
+			free(grp);
+		}
+	}
+	return id;
+}
 
 void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide)
 {
@@ -588,10 +677,20 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 	if(*p_name != name) free(*p_name);
 }
 
+char * get_name_to_be_replaced(const struct idmapping *p_map)
+{
+	if(p_map->name_from != NULL)
+	{
+		return p_map->name_from;
+	}
+	return NULL;
+}
+
 id_t get_id_to_be_replaced(const struct idmapping *p_map, const id_t new_id)
 {
 	/* Returns the ID which has to be replaced to 'new_id'
 	   according to rule pointed by 'p_map'.
+	   Irrespecting to 'name_from' field (see get_name_to_be_replaced() for it).
 	   Used in reverse mapping. */
 	
 	if(p_map->intv == MAPINTV_N_TO_1)
@@ -611,12 +710,17 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 	{
 		if(p_map->nssdb_type == nssdb_type)
 		{
-			// TODO: reverse mapping lookup by names
+			char * forward_map_name;
+			id_t forward_map_id;
+			
+			forward_map_name = NULL;
 			
 			if(p_map->statpath != NULL)
 			{
-				/* Scan all possible files to find out which ID maps to '*id'. */
-				/* NOTE: this is expensive */
+				/* This rule maps to file uid/gid. */
+				/* Scan all possible files to find out which one has '*id'. */
+				/* NOTE: this is IO expensive */
+				
 				char *path;
 				glob_t matches;
 				int idx;
@@ -643,19 +747,43 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 					
 					if(stat(matches.gl_pathv[idx], &st) == 0)
 					{
-						id_t verify_id;
+						id_t file_id;
 						
-						verify_id = (id_t)(nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid);
-						if(verify_id == *id)
+						file_id = (id_t)(nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid);
+						if(file_id == *id)
 						{
-							/* Verify that file uid/gid of this rule really maps to this file's uid/gid,
-							   because it may have been covered earlier or path pattern may not match. */
-							id_t forward_map_id;
+							/* This file has uid/gid which we want to find out which uid/gid
+							   maps to. Verify that uid/gid/username/groupname of this rule really 
+							   maps to this file's uid/gid, because it may have been covered 
+							   earlier or path pattern may not match at all. */
+							id_t verify_id;
 							bool hide;
 							
-							forward_map_id = get_id_to_be_replaced(p_map, *id);
-							verify_id = forward_map_id;
-							do_idmap(nssdb_type, &verify_id, NULL, &hide);
+							if(forward_map_name == NULL)
+								forward_map_name = get_name_to_be_replaced(p_map);
+							if(forward_map_name != NULL)
+							{
+								/* TODO: we can reduce internal nss lookups by having _nss_idmap_getXXuid_r
+								   to lookup entry not by uid but by name when there is a name-based rule
+								   in idmappings to the queried ID. */
+								bool id_found;
+								
+								forward_map_id = lazy_resolve_id(nssdb_type, forward_map_name, &id_found);
+								if(!id_found)
+								{
+									/* we don't know what is the ID of this named entity, so it probably 
+									   does not even exist. let's skip this rule. */
+									break;
+								}
+								verify_id = forward_map_id;
+								do_idmap(nssdb_type, &verify_id, forward_map_name, &hide);
+							}
+							else
+							{
+								forward_map_id = get_id_to_be_replaced(p_map, *id);
+								verify_id = forward_map_id;
+								do_idmap(nssdb_type, &verify_id, NULL, &hide);
+							}
 							
 							if(verify_id == *id && !hide)
 							{
@@ -671,6 +799,7 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 						// TODO: how to handle these errors?
 					}
 				}
+				
 				globfree(&matches);
 				if(id_found)
 				{
@@ -691,12 +820,16 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 			else if((p_map->intv == MAPINTV_N_TO_1 && p_map->id_to == *id) ||
 			   (p_map->intv == MAPINTV_N_TO_N && p_map->id_to <= *id && (p_map->id_to + (p_map->id_from_end - p_map->id_from_start)) >= *id))
 			{
+				/* This rule maps to 1 or more ID. */
+				
 				#ifdef DEBUG
 				fprintf(stderr, "libnss_idmap: reverse map %cid %d ", nssdb_type == NSSDB_PASSWD ? 'u' : 'g', *id);
 				#endif
 				
 				// TODO: do forward mapping here to verify whether 'id_from_start' really maps to '*id',
 				//  so no earlier mapping rule covers it.
+				
+				// TODO: account for p_map->name_from (forward_map_name, forward_map_id)
 				
 				*id = get_id_to_be_replaced(p_map, *id);
 				
@@ -743,8 +876,15 @@ _nss_idmap_getpwnam_r(const char *name, struct passwd *result, char *buffer, siz
 		do_idmap_pwd(result, &hide);
 		if(hide) return NSS_STATUS_NOTFOUND;
 		
-		// TODO: check if the resulted UID would be mapped to something,
-		//   to prevent multiple users with the same UID
+		/* Note: if there was no id mapping, then you may have an entry with
+		   the same id as some other entry with mapped id. To prevent it, add
+		   an explicite hide rule, like:
+		     uid 1000 to 1001
+		     uid 1001 hide
+		   Not hiding the replacement ID would lead to alice and bob both had
+		   UID 1001, given that alice:1000 and bob:1001 in the upstream nss modules. */
+		
+		// TODO: address above issue in case to name- and file-based mapping
 		
 		return NSS_STATUS_SUCCESS;
 	}
@@ -788,6 +928,7 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		
 		/* Note: you won't necessarily get back the requested UID
 		   if you defined N:1 mapping to the requested UID. */
+		
 		do_idmap_pwd(result, &hide);
 		if(hide) return NSS_STATUS_NOTFOUND;
 		
@@ -815,8 +956,7 @@ _nss_idmap_getgrnam_r(const char *name, struct group *result, char *buffer, size
 		do_idmap_grp(result, &hide);
 		if(hide) return NSS_STATUS_NOTFOUND;
 		
-		// TODO: check if the resulted GID would be mapped to something,
-		//   to prevent multiple groups with the same GID
+		// TODO: see issue in _nss_idmap_getpwnam_r()
 		
 		return NSS_STATUS_SUCCESS;
 	}
