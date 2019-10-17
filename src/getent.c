@@ -1,3 +1,5 @@
+/* It is included twice, first for passwd, second for group nss service. */
+
 enum nss_status
 IDMAP_SETENT(int stayopen)
 {
@@ -35,6 +37,7 @@ IDMAP_SETENT(int stayopen)
 			GETENT_ARRAY = realloc(GETENT_ARRAY, (idx_entry+2) * sizeof(STRUCTNAME));
 			if(GETENT_ARRAY == NULL) abort();
 			
+			/* copy out entry from libc's static area to our static array of the appropriate type */
 			COPY_STRUCT(&(GETENT_ARRAY[idx_entry]), entry);
 			
 			idx_entry++;

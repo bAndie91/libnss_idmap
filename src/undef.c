@@ -1,3 +1,4 @@
+/* Clear variables used in getent.c include file */
 #undef STRUCTNAME
 #undef FREE_ENTRIES
 #undef SETENTNAME
