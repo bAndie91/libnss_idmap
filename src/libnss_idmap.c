@@ -335,27 +335,77 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 	if(*p_name != name) free(*p_name);
 }
 
-char * get_name_to_be_replaced(const struct idmapping *p_map)
-{
-	if(p_map->name_from != NULL)
-	{
-		return p_map->name_from;
-	}
-	return NULL;
-}
-
-id_t get_id_to_be_replaced(const struct idmapping *p_map, const id_t new_id)
+id_t get_id_to_be_replaced(const struct idmapping *p_map, const id_t new_id, const id_t * backend_id, bool * found)
 {
 	/* Returns the ID which has to be replaced to 'new_id'
 	   according to rule pointed by 'p_map'.
-	   Irrespecting to 'name_from' field (see get_name_to_be_replaced() for it).
+	   Indicate if it was found in '*found' parameter, check it before
+	   consume return value.
+	   Caller may supply pointer to uid/gid of the named entity in 'backend_id' 
+	   if it's a name-based rule and the ID is known by the caller (to reduce
+	   unnecessary nss lookup here) or leave it NULL.
+	   It respects to 'name_from' field.
 	   Used in reverse mapping. */
 	
-	if(p_map->intv == MAPINTV_N_TO_1)
-		/* NOTE: ambiguous reverse mapping */
-		return p_map->id_from_start;
+	*found = FALSE;
+	
+	if(p_map->name_from != NULL)
+	{
+		/* it's a name-based rule */
+		if(backend_id != NULL)
+		{
+			*found = TRUE;
+			return *backend_id;
+		}
+		else
+			return lazy_resolve_id(p_map->nssdb_type, p_map->name_from, found);
+	}
 	else
-		return p_map->id_from_start + (new_id - p_map->id_to);
+	{
+		/* it's an ID-based rule */
+		*found = TRUE;
+		if(p_map->intv == MAPINTV_N_TO_1)
+			/* NOTE: ambiguous reverse mapping */
+			return p_map->id_from_start;
+		else
+			return p_map->id_from_start + (new_id - p_map->id_to);
+	}
+	/* return value is undefined (*found==FALSE) here */
+	return -1;
+}
+
+bool verify_mapping(struct idmapping * p_map, id_t id_to, id_t * id_from)
+{
+	/* Verify whether base ID of this rule (uid/gid defined in the rule
+	   to be replaced, or uid/gid of the named entity defined in the
+	   name-based rule) really maps to 'id_to'.
+	   If so, save the base ID to 'id_from' as a side effect. */
+	id_t forward_map_id;
+	id_t verify_id;
+	bool hide;
+	bool id_found;
+	
+	forward_map_id = get_id_to_be_replaced(p_map, id_to, NULL, &id_found);
+	if(!id_found)
+	{
+		/* we don't know what is the ID of this named entity, so it probably 
+		   does not even exist. let's invalidate this verification. */
+		return FALSE;
+	}
+	verify_id = forward_map_id;
+	do_idmap(p_map->nssdb_type, &verify_id, NULL, &hide);
+	
+	if(verify_id == id_to && !hide)
+	{
+		*id_from = forward_map_id;
+		return TRUE;
+	}
+	else
+	{
+		/* the complete ruleset maps 'forward_map_id' to something
+		   else than 'id_to' */
+		return FALSE;
+	}
 }
 
 void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
@@ -364,129 +414,95 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 	
 	read_idmap();
 	
+	DEBUGPRINT("(libnss_idmap: reverse map %cid %d back ", NSSDB_TYPE_CHAR, *id);
+	
 	for(p_map = idmappings; p_map != NULL; p_map = p_map->next)
 	{
-		if(p_map->nssdb_type == nssdb_type)
+		if(p_map->nssdb_type != nssdb_type) continue;
+		
+		id_t forward_map_id;
+		
+		if(p_map->statpath != NULL)
 		{
-			char * forward_map_name;
-			id_t forward_map_id;
+			/* This rule maps to file uid/gid. */
+			/* Scan all possible files to find out which one has '*id'. */
+			/* NOTE: this is IO expensive */
 			
-			forward_map_name = NULL;
+			char *path;
+			glob_t matches;
+			int idx;
+			bool id_found;
 			
-			if(p_map->statpath != NULL)
+			id_found = FALSE;
+			path = abstrdup(p_map->statpath);
+			abstrrepl(&path, "{ID}", "?*");
+			abstrrepl(&path, "{NAME}", "?*");
+			glob(path, GLOB_NOSORT, NULL, &matches);
+			
+			for(idx = 0; matches.gl_pathv != NULL && matches.gl_pathv[idx] != NULL; idx++)
 			{
-				/* This rule maps to file uid/gid. */
-				/* Scan all possible files to find out which one has '*id'. */
-				/* NOTE: this is IO expensive */
+				/* Verify that uid/gid of this file equals to '*id' */
+				struct stat st;
 				
-				char *path;
-				glob_t matches;
-				int idx;
-				bool id_found;
+				DEBUGPRINT("[%s] ", matches.gl_pathv[idx]);
 				
-				DEBUGPRINT("(libnss_idmap: reverse map %cid %d back ", NSSDB_TYPE_CHAR, *id);
-				
-				id_found = FALSE;
-				path = abstrdup(p_map->statpath);
-				abstrrepl(&path, "{ID}", "?*");
-				abstrrepl(&path, "{NAME}", "?*");
-				glob(path, GLOB_NOSORT, NULL, &matches);
-				
-				for(idx = 0; matches.gl_pathv != NULL && matches.gl_pathv[idx] != NULL; idx++)
+				if(stat(matches.gl_pathv[idx], &st) == 0)
 				{
-					/* Verify that uid/gid of this file equals to '*id' */
-					struct stat st;
+					id_t file_id;
 					
-					DEBUGPRINT("[%s] ", matches.gl_pathv[idx]);
-					
-					if(stat(matches.gl_pathv[idx], &st) == 0)
+					file_id = (id_t)(nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid);
+					if(file_id == *id)
 					{
-						id_t file_id;
+						/* This file has uid/gid which we want to find out which uid/gid
+						   maps to. Verify that uid/gid/username/groupname of this rule really 
+						   maps to this file's uid/gid, because it may have been covered 
+						   earlier or path pattern may not match at all. */
 						
-						file_id = (id_t)(nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid);
-						if(file_id == *id)
+						if(verify_mapping(p_map, *id, &forward_map_id))
 						{
-							/* This file has uid/gid which we want to find out which uid/gid
-							   maps to. Verify that uid/gid/username/groupname of this rule really 
-							   maps to this file's uid/gid, because it may have been covered 
-							   earlier or path pattern may not match at all. */
-							id_t verify_id;
-							bool hide;
-							
-							if(forward_map_name == NULL)
-								forward_map_name = get_name_to_be_replaced(p_map);
-							if(forward_map_name != NULL)
-							{
-								/* TODO: we can reduce internal nss lookups by having _nss_idmap_getXXuid_r
-								   to lookup entry not by uid but by name when there is a name-based rule
-								   in idmappings to the queried ID. */
-								bool id_found;
-								
-								forward_map_id = lazy_resolve_id(nssdb_type, forward_map_name, &id_found);
-								if(!id_found)
-								{
-									/* we don't know what is the ID of this named entity, so it probably 
-									   does not even exist. let's skip this rule. */
-									break;
-								}
-								verify_id = forward_map_id;
-								do_idmap(nssdb_type, &verify_id, forward_map_name, &hide);
-							}
-							else
-							{
-								forward_map_id = get_id_to_be_replaced(p_map, *id);
-								verify_id = forward_map_id;
-								do_idmap(nssdb_type, &verify_id, NULL, &hide);
-							}
-							
-							if(verify_id == *id && !hide)
-							{
-								/* UID/GID of this rule was the one which maps to the '*id' in the reverse mapping call. */
-								*id = forward_map_id;
-								id_found = TRUE;
-								break;
-							}
+							/* UID/GID of this rule was the one which maps to the '*id' in the reverse mapping call. */
+							*id = forward_map_id;
+							id_found = TRUE;
 						}
+						
+						break;
 					}
-					else
-					{
-						// TODO: how to handle these errors?
-					}
-				}
-				
-				globfree(&matches);
-				if(id_found)
-				{
-					DEBUGPRINT("to %d)\n", *id);
-					break;
 				}
 				else
 				{
-					DEBUGPRINT("...)\n");
 					// TODO: how to handle these errors?
 				}
 			}
 			
-			else if((p_map->intv == MAPINTV_N_TO_1 && p_map->id_to == *id) ||
-			   (p_map->intv == MAPINTV_N_TO_N && p_map->id_to <= *id && (p_map->id_to + (p_map->id_from_end - p_map->id_from_start)) >= *id))
+			globfree(&matches);
+			if(id_found)
 			{
-				/* This rule maps to 1 or more ID. */
-				
-				DEBUGPRINT("(libnss_idmap: reverse map %cid %d ", NSSDB_TYPE_CHAR, *id);
-				
-				// TODO: do forward mapping here to verify whether 'id_from_start' really maps to '*id',
-				//  so no earlier mapping rule covers it.
-				
-				// TODO: account for p_map->name_from (forward_map_name, forward_map_id)
-				
-				*id = get_id_to_be_replaced(p_map, *id);
-				
-				DEBUGPRINT("to %d)\n", *id);
-				
+				DEBUGPRINT("to %d", *id);
 				break;
 			}
+			else
+			{
+				DEBUGPRINT("... [rule '%s' mismatched] ", p_map->statpath);
+				// TODO: how to handle these errors?
+			}
+		}
+		
+		else if((p_map->intv == MAPINTV_N_TO_1 && p_map->id_to == *id) ||
+		   (p_map->intv == MAPINTV_N_TO_N && p_map->id_to <= *id && (p_map->id_to + (p_map->id_from_end - p_map->id_from_start)) >= *id))
+		{
+			/* This rule maps to 1 or more ID. */
+			
+			if(verify_mapping(p_map, *id, &forward_map_id))
+			{
+				/* UID/GID of this rule was the one which maps to the '*id' in the reverse mapping call. */
+				*id = forward_map_id;
+				DEBUGPRINT("to %d", *id);
+				break;
+			}
+			DEBUGPRINT("... [rule mismatched] ");
 		}
 	}
+	DEBUGPRINT(")\n");
 }
 
 void do_idmap_pwd(struct passwd *pwd, bool *hide)
@@ -566,6 +582,10 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 				return NSS_STATUS_NOTFOUND;
 			}
 		}
+		
+		/* TODO: we can reduce internal nss lookups by having _nss_idmap_getXXuid_r
+		   to lookup entry not by uid but by name when there is a name-based rule
+		   in idmappings to the queried ID. */
 		
 		passthrough_mode = TRUE;
 		error = getpwuid_r(lookup_uid, result, buffer, buflen, &result);
