@@ -261,7 +261,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 			{
 				char *path;
 				
-				DEBUGPRINT("libnss_idmap: forward map %cid %d ", NSSDB_TYPE_CHAR, *id);
+				DEBUGPRINT("(libnss_idmap: forward map %cid %d ", NSSDB_TYPE_CHAR, *id);
 				
 				if(p_map->statpath != NULL)
 				{
@@ -291,7 +291,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 					{
 						*id = nssdb_type == NSSDB_PASSWD ? st.st_uid : st.st_gid;
 						
-						DEBUGPRINT("to %d as %s\n", *id, path);
+						DEBUGPRINT("to %d as %s)\n", *id, path);
 					}
 					else
 					{
@@ -300,11 +300,11 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 						{
 							if(hide != NULL) *hide = TRUE;
 							
-							DEBUGPRINT("to - as %s failed\n", path);
+							DEBUGPRINT("to - as %s failed)\n", path);
 						}
 						else if(p_map->on_stat_error == STATERR_IGNORE)
 						{
-							DEBUGPRINT("... (%s failed)\n", path);
+							DEBUGPRINT("... [%s failed])\n", path);
 							
 							free(path);
 							continue;
@@ -316,7 +316,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 				{
 					if(hide != NULL) *hide = TRUE;
 					
-					DEBUGPRINT("to -\n");
+					DEBUGPRINT("to -)\n");
 				}
 				else
 				{
@@ -325,7 +325,7 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 					else
 						*id = p_map->id_to + (*id - p_map->id_from_start);
 					
-					DEBUGPRINT("to %d\n", *id);
+					DEBUGPRINT("to %d)\n", *id);
 				}
 				break;
 			}
@@ -384,7 +384,7 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 				int idx;
 				bool id_found;
 				
-				DEBUGPRINT("libnss_idmap: reverse map %cid %d back ", NSSDB_TYPE_CHAR, *id);
+				DEBUGPRINT("(libnss_idmap: reverse map %cid %d back ", NSSDB_TYPE_CHAR, *id);
 				
 				id_found = FALSE;
 				path = abstrdup(p_map->statpath);
@@ -457,12 +457,12 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 				globfree(&matches);
 				if(id_found)
 				{
-					DEBUGPRINT("to %d\n", *id);
+					DEBUGPRINT("to %d)\n", *id);
 					break;
 				}
 				else
 				{
-					DEBUGPRINT("...\n");
+					DEBUGPRINT("...)\n");
 					// TODO: how to handle these errors?
 				}
 			}
@@ -472,7 +472,7 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 			{
 				/* This rule maps to 1 or more ID. */
 				
-				DEBUGPRINT("libnss_idmap: reverse map %cid %d ", NSSDB_TYPE_CHAR, *id);
+				DEBUGPRINT("(libnss_idmap: reverse map %cid %d ", NSSDB_TYPE_CHAR, *id);
 				
 				// TODO: do forward mapping here to verify whether 'id_from_start' really maps to '*id',
 				//  so no earlier mapping rule covers it.
@@ -481,7 +481,7 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 				
 				*id = get_id_to_be_replaced(p_map, *id);
 				
-				DEBUGPRINT("to %d\n", *id);
+				DEBUGPRINT("to %d)\n", *id);
 				
 				break;
 			}
