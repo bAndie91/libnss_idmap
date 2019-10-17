@@ -7,21 +7,25 @@ uid 1000 to 2000
 # same goes for GIDs
 gid 1234 to 5432
 
+# mapping based on names
+user john to 1234
+group accounting to 4000
+
 # range mapping is also supported
-# here uid 2000 goes to 3000, 2001 to 3001, 2100 to 3100, etc
+# here uid 2000 goes to 3000, 2001 to 3001, etc, 2100 to 3100
 uid 2000-2100 to 3000-
 gid 1100-1499 to 1500-
 
 # don't show user with uid=2000
 # this is useful to prevent two users with the same UID
-uid 2000 hide
 uid 1000 to 2000
+uid 2000 hide
 
 # you can swap two UIDs
 uid 1000 to 2000
 uid 2000 to 1000
 
-# let replacement UID be a file's owner UID
+# let the replacement UID be a file's owner UID
 uid 1000 as /home/{NAME} or retain
 # these template variables are supported:
 #   {NAME} substitutes to the user/group name
@@ -37,5 +41,5 @@ uid 1234 as /home/{NAME} or retain
 uid 1234 as /home/{NAME} or hide
 
 # if the file is not found, then ignore this rule 
-# and continue with further ones
+# and continue processing further mapping rules
 uid 1234 as /home/{NAME} or ignore
