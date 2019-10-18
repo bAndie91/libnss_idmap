@@ -70,6 +70,10 @@ static struct group *cur_grent;
 
 void read_idmap()
 {
+	/* Read config file which contains ID mapping rules.
+	   Fill up static space pointed by 'idmappings'.
+	   Left file open.
+	   Re-reads file only if changed (based on inode mtime). */
 	struct stat st;
 	struct idmapping map;
 	struct idmapping *p_map1;
@@ -218,6 +222,8 @@ void free_grentries()
 
 void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide)
 {
+	/* Set 'id' to the new UID/GID 'id' has to be replaced to.
+	   Set 'hide' according to whether the entry should be hidden or not. */
 	struct idmapping *p_map;
 	struct stat st;
 	char **p_name;
@@ -244,7 +250,9 @@ void do_idmap(enum nssdb_type nssdb_type, id_t *id, const char *name, bool *hide
 				}
 				if(*p_name == NULL)
 				{
-					// TODO: how to handle these errors?
+					/* user/group name can not be resolved.
+					   let's skip this rule. */
+					continue;
 				}
 				if(strcmp(p_map->name_from, *p_name)==0)
 				{
@@ -441,7 +449,7 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 			
 			for(idx = 0; matches.gl_pathv != NULL && matches.gl_pathv[idx] != NULL; idx++)
 			{
-				/* Verify that uid/gid of this file equals to '*id' */
+				/* Check that uid/gid of this file equals to '*id' */
 				struct stat st;
 				
 				DEBUGPRINT("[%s] ", matches.gl_pathv[idx]);
@@ -470,7 +478,8 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 				}
 				else
 				{
-					// TODO: how to handle these errors?
+					/* stat(2) error happened, but it has not neccessarily been on a file defined
+					   in the config file, so ignore what p_map->on_stat_error commands. */
 				}
 			}
 			
@@ -483,7 +492,6 @@ void do_idmap_reverse(enum nssdb_type nssdb_type, id_t *id)
 			else
 			{
 				DEBUGPRINT("... [rule '%s' mismatched] ", p_map->statpath);
-				// TODO: how to handle these errors?
 			}
 		}
 		
@@ -538,15 +546,18 @@ _nss_idmap_getpwnam_r(const char *name, struct passwd *result, char *buffer, siz
 		do_idmap_pwd(result, &hide);
 		if(hide) return NSS_STATUS_NOTFOUND;
 		
-		/* Note: if there was no id mapping, then you may have an entry with
+		/* Note: if there was no id mapping here, then you may get an entry with
 		   the same id as some other entry with mapped id. To prevent it, add
 		   an explicite hide rule, like:
 		     uid 1000 to 1001
 		     uid 1001 hide
+		   or:
+		     user alice to 1001
+		     user bob hide
 		   Not hiding the replacement ID would lead to alice and bob both had
 		   UID 1001, given that alice:1000 and bob:1001 in the upstream nss modules. */
 		
-		// TODO: address above issue in case to name- and file-based mapping
+		// TODO: address above issue in case of file-based mapping
 		
 		return NSS_STATUS_SUCCESS;
 	}
