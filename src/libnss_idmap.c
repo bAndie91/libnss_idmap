@@ -577,14 +577,23 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		bool hide;
 		
 		/* lookup which UID would map to the requested UID 
-		   and get that one from the upstream modules */
+		   and lookup that UID in the upstream modules */
 		lookup_uid = uid;
 		do_idmap_reverse(NSSDB_PASSWD, (id_t*)&lookup_uid);
 		
 		if(lookup_uid == uid)
 		{
-			/* there is no UID mapped to the requested UID,
-			   check if the requested UID maps to something else */
+			/* There is no source UID mapped to the requested UID.
+			   check if the requested UID maps to something else,
+			   if so then return "not found". */
+			
+			/* TODO: to reduce internal nss lookups, 'name' parameter 
+			   may be passed to do_idmap() if do_idmap_reverse() above 
+			   obtained the it during its runtime. 
+			   but we must either copy the string or disable the next
+			   read_idmap() call to prevent it to free() the pointer 
+			   which points to the name in a mapping rule. */
+			
 			do_idmap(NSSDB_PASSWD, (id_t*)&lookup_uid, NULL, &hide);
 			if(lookup_uid != uid || hide)
 			{
@@ -596,7 +605,7 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		
 		/* TODO: we can reduce internal nss lookups by having _nss_idmap_getXXuid_r
 		   to lookup entry not by uid but by name when there is a name-based rule
-		   in idmappings to the queried ID. */
+		   in idmappings to the requested ID. */
 		
 		passthrough_mode = TRUE;
 		error = getpwuid_r(lookup_uid, result, buffer, buflen, &result);
@@ -604,7 +613,7 @@ _nss_idmap_getpwuid_r(uid_t uid, struct passwd *result, char *buffer, size_t buf
 		HANDLE_ERRORS_R;
 		
 		/* Note: you won't necessarily get back the requested UID
-		   if you defined N:1 mapping to the requested UID. */
+		   if you defined N:1 (overloaded) mapping to the requested UID. */
 		
 		do_idmap_pwd(result, &hide);
 		if(hide) return NSS_STATUS_NOTFOUND;
@@ -652,8 +661,9 @@ _nss_idmap_getgrgid_r(gid_t gid, struct group *result, char *buffer, size_t bufl
 		gid_t lookup_gid;
 		bool hide;
 		
-		/* perform reverse mapping.
-		   see comments in _nss_idmap_getpwuid_r(). */
+		/* Perform reverse mapping.
+		   See comments in _nss_idmap_getpwuid_r() why is it needed. */
+		
 		lookup_gid = gid;
 		do_idmap_reverse(NSSDB_GROUP, (id_t*)&lookup_gid);
 		
