@@ -47,19 +47,22 @@ do
 		cat expect.tmpl | subst_vars > expect
 		LD_LIBRARY_PATH=.. getent "${getent_args[@]}" | tee output
 		
-		lno=0
-		while read -r outl
+		while read -r expl
 		do
-			let lno++
-			read -u 3 expl
-			if ! grep -E "$expl" <<<"$outl"
+			if [ "${expl:0:1}" = '!' ]
 			then
-				echo "Output in line $lno does not match to expectation:" >&2
-				echo "  \"$outl\"" >&2
-				echo "  /$expl/" >&2
+				neg='! '
+				expl=${expl:1}
+			else
+				neg=''
+			fi
+			grep -P "$expl" output
+			if [ \( "$neg" = "" -a $? != 0 \) -o \( "$neg" != "" -a $? = 0 \) ]
+			then
+				echo "Output does not match to expectation: $neg/$expl/" >&2
 				exit 1
 			fi
-		done < output 3<expect
+		done < expect
 		
 		exit 0
 	)
