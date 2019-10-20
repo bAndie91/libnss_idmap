@@ -1,0 +1,6 @@
+# /etc/nsswitch.conf
+
+passwd:			idmap [NOTFOUND=return] files
+group:			idmap [NOTFOUND=return] files
+shadow:			files
+gshadow:		files

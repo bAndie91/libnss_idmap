@@ -1,0 +1,12 @@
+{ global:
+_nss_idmap_endgrent;
+_nss_idmap_endpwent;
+_nss_idmap_getgrent_r;
+_nss_idmap_getgrgid_r;
+_nss_idmap_getgrnam_r;
+_nss_idmap_getpwent_r;
+_nss_idmap_getpwnam_r;
+_nss_idmap_getpwuid_r;
+_nss_idmap_setgrent;
+_nss_idmap_setpwent;
+local: *; };
