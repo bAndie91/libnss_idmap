@@ -1,2 +1,9 @@
 src/*.so
 src/*.so.2
+test/libc.so.6
+test/libnss_idmap.so
+test/libnss_idmap.so.2
+test/nsswitch.conf
+test/test-*/idmap
+test/test-*/output
+test/test-*/expect
