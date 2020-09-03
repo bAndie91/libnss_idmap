@@ -10,3 +10,6 @@ It's an nsswitch modules like `files`, `compat`, `nis`, or `sssd`. It calls othe
 # Examples
 
 see config [examples](src/idmap.examples)
+
+# issues
+Please submit issues via PR to some file `issue/TITLE.txt`.
